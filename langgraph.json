@@ -3,12 +3,9 @@
     "graphs": {
       "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher"
     },
-    "python_version": "3.11",
+    "python_version": "3.13",
     "env": "./.env",
     "dependencies": [
       "."
-    ],
-    "auth": {
-      "path": "./src/security/auth.py:auth"
-    }
+    ]
 }

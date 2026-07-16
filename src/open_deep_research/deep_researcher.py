@@ -3,6 +3,7 @@
 import asyncio
 from typing import Literal
 
+from open_deep_research import create_configurable_model
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
     AIMessage,
@@ -52,8 +53,10 @@ from open_deep_research.utils import (
     think_tool,
 )
 
-# Initialize a configurable model that we will use throughout the agent
-configurable_model = init_chat_model(
+# Initialize a configurable model that we will use throughout the agent.
+# This wrapper routes ``minimax:`` model names to our ChatMiniMax class and
+# everything else to langchain's default ``init_chat_model`` dispatcher.
+configurable_model = create_configurable_model(
     configurable_fields=("model", "max_tokens", "api_key"),
 )
 
