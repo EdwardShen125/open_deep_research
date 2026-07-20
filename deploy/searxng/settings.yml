@@ -1,0 +1,55 @@
+# SearXNG 配置 - 网络隔离版
+# 仅通过 internal network 提供 HTTP API,pipeline 容器不可直连外网搜索引擎
+server:
+  bind_address: 0.0.0.0
+  port: 8080
+  secret_key: "${SEARXNG_SECRET}"
+  limiter: false
+  image_proxy: false
+
+outgoing:
+  pool_connections: 100
+  pool_maxsize: 20
+  request_timeout: 5.0
+  enable_http2: false
+  retries: 1
+
+engines:
+  # 全文类 - 用于 Phase 1 检索
+  - name: google
+    disabled: false
+    shortcut: go
+  - name: bing
+    disabled: false
+    shortcut: bi
+  - name: duckduckgo
+    disabled: false
+    shortcut: ddg
+  - name: brave
+    disabled: false
+    shortcut: br
+  - name: startpage
+    disabled: false
+    shortcut: sp
+
+  # 不启用 raw-html 类引擎,避免被滥用为代理
+
+# 提供 doi_resolvers 以满足 2026 版 SearXNG 的 choices 校验
+doi_resolvers:
+  oadoi.org: https://api.oadoi.org/
+  doi.org: https://doi.org/
+
+default_doi_resolver: oadoi.org
+
+formats:
+  - json
+  - csv
+  - rss
+
+categories_as_tabs:
+  general:
+    categories: [general]
+  images:
+    categories: [images]
+
+# default_doi_resolver: 2026 版 SearXNG 已移除 DOI resolver 功能,字段必须省略

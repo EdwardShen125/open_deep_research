@@ -1,0 +1,101 @@
+# Phase 0.5 基础设施 (网络隔离修正版)
+#
+# 网络拓扑:
+#   outside-bridge  : 普通 bridge,仅基础设施服务可达外网(用于 SearXNG 抓取)
+#   data            : internal:true,仅基础设施服务互访(pipeline-shell 看不到)
+#   pipeline-internal: internal:true,pipeline-shell 专用,容器间隔离,不可外联
+#
+# pipeline-shell 只接 pipeline-internal,通过 service name 访问内部服务。
+# 内部服务在 data 与 pipeline-internal 两个 network 上都有端点。
+
+name: odr-v2-infra
+
+networks:
+  outside-bridge:
+    driver: bridge
+  data:
+    driver: bridge
+    internal: true
+  pipeline-internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: odr-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      data:
+        aliases: [odr-postgres]
+      pipeline-internal:
+        aliases: [odr-postgres]
+      outside-bridge: {}
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: odr-redis
+    restart: unless-stopped
+    command: ['redis-server', '--save', '60', '1', '--loglevel', 'warning', '--maxmemory', '256mb', '--maxmemory-policy', 'allkeys-lru']
+    volumes:
+      - redisdata:/data
+    networks:
+      data:
+        aliases: [odr-redis]
+      pipeline-internal:
+        aliases: [odr-redis]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: odr-searxng
+    restart: unless-stopped
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      data:
+        aliases: [odr-searxng]
+      pipeline-internal:
+        aliases: [odr-searxng]
+      outside-bridge: {}
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET}
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:8080/']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # 隔离验证用容器 - 只接 pipeline-internal,不可外联
+  pipeline-shell:
+    image: python:3.11-slim
+    container_name: odr-pipeline-shell
+    profiles: ['test-isolation']
+    networks:
+      pipeline-internal:
+        aliases: [pipeline-shell]
+    working_dir: /work
+    volumes:
+      - ./..:/work
+    command: ['sleep', 'infinity']
