@@ -1,0 +1,33 @@
+{
+  "bench_id": 93,
+  "prompt_len": 266,
+  "prompt": "Please prepare a market research analysis of the global video editing and creation software/tool market. Include major products like those from Adobe (Premiere Pro, After Effects), CapCut, DaVinci Resolve, Final Cut Pro, and others relevant in the current landscape.",
+  "baseline_article_len": 24691,
+  "elapsed_seconds": 376.62944078445435,
+  "model_provider": "minimax:MiniMax-M3 (default)",
+  "summary": {
+    "evidence_units": 739,
+    "unique_urls": 0,
+    "unique_domains": 0,
+    "numeric_anchors": 0,
+    "cited_sections": 0,
+    "cited_claims": 0,
+    "verification_issues": 0,
+    "verification_by_severity": {},
+    "url_compliance_issues": 0,
+    "final_report_chars": 33120,
+    "final_report_starts_with_error_json": false
+  },
+  "state_keys": [
+    "cited_report",
+    "evidence_units",
+    "final_report",
+    "messages",
+    "notes",
+    "raw_notes",
+    "research_brief",
+    "supervisor_messages",
+    "url_compliance",
+    "verification"
+  ]
+}

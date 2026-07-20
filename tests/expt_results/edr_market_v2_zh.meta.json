@@ -1,0 +1,31 @@
+{
+  "bench_id": 0,
+  "prompt_len": 1184,
+  "prompt": "请撰写一份截至 2026 年中期的全球终端检测与响应(Endpoint Detection and Response, EDR)软件市场综合调研报告。报告需覆盖以下 10 个维度:\n\n1. 市场规模与增长: 至少引用三家权威分析机构(Gartner / IDC / Forrester 等)的 2025 年总可寻址市场(TAM)数据,以及到 2030 年以上的复合年增长率(CAGR)预测。\n\n2. 主要厂商画像: 详细分析以下厂商——CrowdStrike Falcon、Microsoft Defender for Endpoint、SentinelOne Singularity、Palo Alto Networks Cortex XDR、Trend Micro Vision One、Sophos Intercept X、Trellix(原 FireEye/McAfee)、Bitdefender GravityZone、ESET PROTECT、VMware/Carbon Black、Elastic EDR,以及任何新兴 AI 原生挑战者。\n\n3. 能力差异化: EDR vs XDR vs EPP 融合趋势、AI/ML 检测引擎、行为分析、勒索软件防护、威胁情报订阅、托管检测响应(MDR)捆绑服务。\n\n4. 部署模式: 云原生 vs 本地部署 vs 混合云、多租户 SaaS、Agent 架构(内核态 vs 用户态)。\n\n5. 定价与许可: 终端订阅分层价格、平台捆绑、MSSP 定价、免费层/试用版策略。\n\n6. 竞争格局: 市场份额、最近的并购(例如 Cisco/Splunk、Palo Alto/IronNet)、战略合作、裁员、厂商整合。\n\n7. 终端用户分层: 大型企业 vs 中端市场 vs 中小企业 vs 政府/国防的采用率,行业垂直差异(金融、医疗、制造)。\n\n8. 区域分布: 北美、EMEA、亚太、拉美的市场份额与增长。\n\n9. 监管环境: NIS2、DORA、SEC 网络事件披露规则、CISA 指令、中国 MLPS 2.0 等如何驱动 EDR 采用。\n\n10. 2026-2028 战略展望: 市场如何进一步整合、AI 原生 SOC 分析师替代、平台化趋势。\n\n请使用权威来源:Gartner Magic Quadrant、IDC MarketScape、Forrester Wave、MITRE ATT&CK 评估、厂商财报、SEC 文件、同行评审的安全研究,以及一手新闻稿。\n\n请用中文撰写报告主体,但产品名、公司名、专有名词、技术术语保留英文原文(例如 \"EDR\"、\"XDR\"、\"SOC\"、\"CrowdStrike Falcon\"、\"MITRE ATT&CK\")。报告结构清晰,数据点用具体数字标注,关键论断附置信度评估。",
+  "baseline_article_len": 0,
+  "elapsed_seconds": 365.8477318286896,
+  "model_provider": "minimax:MiniMax-M3 (default)",
+  "summary": {
+    "evidence_units": 523,
+    "unique_urls": 20,
+    "unique_domains": 18,
+    "numeric_anchors": 616,
+    "cited_sections": 0,
+    "cited_claims": 0,
+    "verification_issues": 0,
+    "verification_by_severity": {},
+    "url_compliance_issues": 0,
+    "final_report_chars": 31,
+    "final_report_starts_with_error_json": false
+  },
+  "state_keys": [
+    "evidence_units",
+    "final_report",
+    "messages",
+    "notes",
+    "raw_notes",
+    "research_brief",
+    "supervisor_messages",
+    "url_compliance"
+  ]
+}
