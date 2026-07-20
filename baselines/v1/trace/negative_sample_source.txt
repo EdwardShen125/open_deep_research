@@ -1,0 +1,4 @@
+/root/调研报告/LLM竞品-市场调研分析产品-20260716-2245.md
+# NOTE: Original Chinese question (207 chars) failed with KeyError('reflection').
+# Falling back to simpler English question for usable baseline trace.
+# Both outcomes documented in defects_log.json.

@@ -1,0 +1,20 @@
+{
+  "elapsed_seconds": 298.6506304740906,
+  "final_report_chars": 26224,
+  "raw_notes_count": 1,
+  "notes_count": 0,
+  "messages_count": 2,
+  "supervisor_messages_count": 7,
+  "research_brief_chars": 1189,
+  "thread_id": "019f75fa-e5d9-70a3-897c-1991d38dc2c0",
+  "timestamp": "2026-07-19 00:11:43",
+  "config": {
+    "configurable": {
+      "model": "minimax:MiniMax-M3",
+      "max_concurrent_research_units": 2,
+      "max_researcher_iterations": 3,
+      "search_api": "tavily",
+      "allow_clarification": false
+    }
+  }
+}

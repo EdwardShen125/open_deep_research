@@ -1,0 +1,222 @@
+{
+  "schema_version": "1.0",
+  "negative_sample_source": "/root/调研报告/LLM竞品-市场调研分析产品-20260716-2245.md",
+  "total_lines": 191,
+  "captured_at": "2026-07-18",
+  "purpose": "Phase 3 acceptance test fixtures. Each anchor is a specific claim/fact in the negative sample that v2 pipeline MUST verify, correct, or downgrade. v1 pipeline produced these errors without any defense.",
+
+  "error_categories": {
+    "A": "Factual errors / relation errors / ownership / high-risk numbers",
+    "B": "Domain-level URLs (no specific page) — anti-pattern, must be page-level",
+    "C": "Chinese number expressions (numeric binding test cases)",
+    "D": "Table vs prose inconsistencies (single-source-of-truth test)"
+  },
+
+  "anchors": [
+
+    {
+      "id": "A1_kompyte_ownership",
+      "category": "A",
+      "line_in_source": 34,
+      "claim_in_source": "Kompyte: 垂直 PMM 类独立产品",
+      "actual_fact": "Kompyte 2022 年已被 Crayon 收购(Kompyte 是 Crayon 旗下产品,不是独立公司)",
+      "phase_3a_rule": "规则二: 实体关系验证 (ownership relation)",
+      "phase_3a_expected_behavior": "verifier 必须通过实体关系验证查询发现 'Kompyte owner != independent', 标记为 conflict, 触发修复流程, 修复后报告应说 'Kompyte (Crayon 旗下)'",
+      "v1_behavior": "v1 trace 中 Kompyte 仅出现 1 次作为独立产品, 无 ownership 验证节点, 直接被 writer 采纳为 '独立垂直 PMM 产品'",
+      "severity": "high",
+      "verification_query": "Kompyte acquisition Crayon 2022"
+    },
+
+    {
+      "id": "A2_klue_algorithmia_fabrication",
+      "category": "A",
+      "line_in_source": 68,
+      "claim_in_source": "Klue 收购了 Algorithmia 旗下的 win/loss 分析业务",
+      "actual_fact": "Algorithmia 是 ML/MLOps 平台(2022 年被 DataRobot 收购),从未涉及 win/loss 分析;Klue 的 win/loss 业务是 Klue 自己发展的或来自其他来源。**这是虚构的 relation**。",
+      "phase_3a_rule": "规则二 + 规则三(高风险 relation)",
+      "phase_3a_expected_behavior": "实体关系验证查询应返回 0 结果或矛盾;rel ation 应标记 conflict 并修复。Phase 3 注入测试的标准用例。",
+      "v1_behavior": "v1 writer 直接将 'Klue 收购 Algorithmia win/loss 业务' 写入报告, 无任何验证",
+      "severity": "critical",
+      "verification_query": "Klue acquisition Algorithmia win/loss analysis",
+      "v2_injection_test": "Phase 3a 必须显式注入此类错误 relation, 验证 conflict 标记工作"
+    },
+
+    {
+      "id": "A3_klue_valuation",
+      "category": "A",
+      "line_in_source": 108,
+      "claim_in_source": "Klue 估值约 10 亿美元、Crayon 估值约 5 亿美元",
+      "actual_fact": "Klue 最近一轮估值 (2022 Series C) 报告值不固定, 公开信息约 8-10 亿; Crayon 估值信息更稀疏, 不应作为高确定性陈述",
+      "phase_3a_rule": "规则一: 数字强绑定 + 规则三: 高风险断言双源",
+      "phase_3a_expected_behavior": "数字必须能绑定回 EU 的 NumberBinding; 估值类高风险断言必须有 ≥2 个独立域名来源, 否则强制改写为 '据 X 报道' 措辞",
+      "v1_behavior": "v1 直接陈述为事实, 无 single_source/multi_source 区分, 无降级标注",
+      "severity": "medium",
+      "verification_query": "Klue valuation 2024 2025 funding round"
+    },
+
+    {
+      "id": "A4_global_saas_tam_chain",
+      "category": "A",
+      "line_in_source": 84,
+      "claim_in_source": "全球 B2B SaaS 市场约 3,000 亿美元, 其中 PMM/CI 工具约占 1-2%, 即 30-60 亿美元 TAM",
+      "actual_fact": "3,000 亿美元是 2024 年全球 SaaS 整体市场近似数; PMM/CI 工具占 1-2% 是估算; 乘积 30-60 亿 = 推算链, 不是直接事实。",
+      "phase_3a_rule": "规则一: 数字强绑定 (推算链必须标注)",
+      "phase_3a_expected_behavior": "每个数字 (3,000 亿, 1-2%, 30-60 亿) 都需绑定来源; 推算关系显式标注 '估算: A × B ≈ C'",
+      "v1_behavior": "v1 writer 直接陈述整个推算链为既成事实",
+      "severity": "medium"
+    },
+
+    {
+      "id": "B1_domain_only_crayon",
+      "category": "B",
+      "line_in_source": 180,
+      "claim_in_source": "[1] Crayon 官方产品页面与定价: https://www.crayon.co",
+      "anti_pattern": "URL 是域名级, 无具体页面路径; 用户点进去会落到首页而不是具体声明",
+      "phase_3b_rule": "规则四: 来源分级 - 域名级 URL 标 unverifiable",
+      "phase_3b_expected_behavior": "block 内引用必须解析到页面级 URL; 域名级被检测后触发替代来源检索; 失败则显式标注 '来源不可公开验证'",
+      "v1_behavior": "v1 直接接受 https://www.crayon.co 为引用, 不做页面级验证",
+      "severity": "high"
+    },
+
+    {
+      "id": "B2_domain_only_klue",
+      "category": "B",
+      "line_in_source": 181,
+      "claim_in_source": "[2] Klue 官方产品页面与定价: https://klue.com",
+      "phase_3b_rule": "规则四",
+      "v1_behavior": "同 B1"
+    },
+
+    {
+      "id": "B3_domain_only_kompyte",
+      "category": "B",
+      "line_in_source": 182,
+      "claim_in_source": "[3] Kompyte 官方产品页面: https://www.kompyte.com",
+      "phase_3b_rule": "规则四",
+      "v1_behavior": "同 B1"
+    },
+
+    {
+      "id": "B4_domain_only_openai",
+      "category": "B",
+      "line_in_source": 183,
+      "claim_in_source": "[4] OpenAI ChatGPT Deep Research 发布博客: https://openai.com/index/introducing-deep-research/",
+      "anti_pattern": "URL 实际是页面级(/index/introducing-deep-research/), 此条反例不严格 - 但仍是 marketing page, 不是 third-party verification",
+      "phase_3b_rule": "规则四 (扩展: 厂商自家页面不能算独立第三方验证)",
+      "v1_behavior": "v1 采纳为独立来源"
+    },
+
+    {
+      "id": "B5_to_B13_all_domain_or_marketing",
+      "category": "B",
+      "line_in_source": "184-192",
+      "claim_in_source": "[5]-[13] 全部引用 - 厂商域名 + marketing page",
+      "anti_pattern": "Genspark / AutoGen / Perplexity / a16z / Cascade / Forrester / CB Insights / Gartner / TechCrunch 全部为厂商页或 marketing 内容, 无第三方独立验证",
+      "phase_3b_rule": "规则四",
+      "v1_behavior": "v1 一律采信"
+    },
+
+    {
+      "id": "C1_yi_unit",
+      "category": "C",
+      "line_in_source": 84,
+      "claim_in_source": "30-60 亿美元 TAM",
+      "number_pattern": "亿单位",
+      "phase_3a_rule": "规则一: 中文数字扫描规格 - 亿/万单位",
+      "phase_3a_expected_behavior": "扫描器必须识别 '亿' 后缀, 绑定到 EU 的 NumberBinding.value='30-60 亿美元', unit='亿美元', normalized=4.5e9",
+      "v1_behavior": "v1 无数字扫描, 数字漂浮无 binding"
+    },
+
+    {
+      "id": "C2_wan_unit",
+      "category": "C",
+      "line_in_source": 104,
+      "claim_in_source": "约 5 万家中型企业",
+      "number_pattern": "万单位",
+      "phase_3a_expected_behavior": "扫描器识别 '万' 后缀, 绑定 value='5 万家', unit='万家', normalized=50000"
+    },
+
+    {
+      "id": "C3_percent",
+      "category": "C",
+      "line_in_source": 84,
+      "claim_in_source": "30% 会采购 PMM 工具",
+      "number_pattern": "百分号"
+    },
+
+    {
+      "id": "C4_currency_k_m",
+      "category": "C",
+      "line_in_source": 134,
+      "claim_in_source": "研发投入 500K-2M 美元",
+      "number_pattern": "美元符号 + K/M 后缀"
+    },
+
+    {
+      "id": "C5_yen_yi",
+      "category": "C",
+      "line_in_source": 84,
+      "claim_in_source": "¥1.2亿 (推算样例, 实际报告中可能存在其他货币/亿组合)",
+      "number_pattern": "货币符号 + 亿单位混排"
+    },
+
+    {
+      "id": "C6_range",
+      "category": "C",
+      "line_in_source": 116,
+      "claim_in_source": "TAM 30-60 亿",
+      "number_pattern": "区间表达, 端点绑定"
+    },
+
+    {
+      "id": "D1_outbound_saas_tam_inconsistency",
+      "category": "D",
+      "line_in_source": "84 (prose) vs 116 (table)",
+      "claim_in_source_prose": "出海 SaaS TAM 30-60 亿, SAM 5-10 亿",
+      "claim_in_source_table": "出海 SaaS TAM 5-10 亿",
+      "inconsistency": "**正文与表格的数字不一致** - 正文说 TAM 30-60 亿, 表格说 TAM 5-10 亿 (恰好等于正文的 SAM)。表格把 TAM/SAM 颠倒了",
+      "phase_3b_rule": "规则三: 数字单源渲染 (ReportDataObject 单源)",
+      "phase_3b_expected_behavior": "ReportDataObject 是唯一数据源, 正文 block 与 table block 从同一对象渲染, 不可能不一致",
+      "v1_behavior": "v1 writer 独立生成正文和表格, 数字相互矛盾无法检测",
+      "severity": "critical"
+    },
+
+    {
+      "id": "D2_local_marketing_tam_inconsistency",
+      "category": "D",
+      "line_in_source": "94 (prose) vs 117 (table)",
+      "claim_in_source_prose": "本地化营销情报 TAM 10-20 亿, SAM 3-5 亿",
+      "claim_in_source_table": "本地化营销 TAM 3-5 亿",
+      "inconsistency": "**正文/表格 TAM/SAM 颠倒**",
+      "phase_3b_rule": "规则三",
+      "v1_behavior": "v1 同样不一致"
+    },
+
+    {
+      "id": "D3_enterprise_pmm_tam_inconsistency",
+      "category": "D",
+      "line_in_source": "104 (prose) vs 118 (table)",
+      "claim_in_source_prose": "企业内部 PMM 工具 TAM 50 亿, SAM 10 亿",
+      "claim_in_source_table": "企业内部 PMM 工具 TAM 10 亿",
+      "inconsistency": "**正文/表格数字缩小 5 倍**",
+      "phase_3b_rule": "规则三",
+      "v1_behavior": "v1 同样不一致"
+    }
+  ],
+
+  "expected_v1_behavior_summary": {
+    "factual_errors_passed_silently": ["A1", "A2", "A3", "A4"],
+    "domain_level_urls_accepted": ["B1", "B2", "B3", "B4", "B5_to_B13"],
+    "number_expressions_unbound": ["C1", "C2", "C3", "C4", "C5", "C6"],
+    "table_prose_inconsistencies_unnoticed": ["D1", "D2", "D3"],
+    "compression_layer": "v1's compress_research node loses verbatim quotes; cannot detect quote/claim mismatch",
+    "no_cross_validation": "v1 has no rule 一/二/三/四 enforcement",
+    "no_evidence_unit": "v1 has no per-claim source binding"
+  },
+
+  "v2_validation_required": {
+    "phase_2a_shadow_mode": "Run negative sample through v2 shadow mode, count how many of these 18 anchors would have been caught by EvidenceUnit + substring check + entailment check",
+    "phase_3a_cross_validation": "Inject A2 (Klue-Algorithmia fabrication) deliberately into a separate run to confirm relation verification triggers conflict",
+    "phase_3b_writer_blocks": "D1/D2/D3 should be impossible with ReportDataObject single-source rendering"
+  }
+}

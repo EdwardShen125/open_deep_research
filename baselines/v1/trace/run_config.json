@@ -1,0 +1,21 @@
+{
+  "assistant_id": "e9a5370f-7a53-55a8-ada8-6ab9ef15bb5b",
+  "input": {
+    "messages": [
+      {
+        "role": "human",
+        "content": "Research the current landscape of AI-powered competitive intelligence and market research products in 2025. List 5 main products with their pricing tiers and target customers."
+      }
+    ]
+  },
+  "config": {
+    "configurable": {
+      "model": "minimax:MiniMax-M3",
+      "max_concurrent_research_units": 2,
+      "max_researcher_iterations": 3,
+      "search_api": "tavily",
+      "allow_clarification": false
+    }
+  },
+  "stream_mode": "values"
+}
