@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import aiohttp
-from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -81,14 +80,20 @@ async def tavily_search(
     # Character limit to stay within model token limits (configurable)
     max_char_to_include = configurable.max_content_length
     
-    # Initialize summarization model with retry logic
+    # Initialize summarization model with retry logic.
+    # Phase 0a: route through llm.py for centralized access. Summarization
+    # role is 'webpage_summarizer' (defined in prompts/webpage_summarizer_v1.py).
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
-    summarization_model = init_chat_model(
-        model=configurable.summarization_model,
-        max_tokens=configurable.summarization_model_max_tokens,
-        api_key=model_api_key,
-        tags=["langsmith:nostream"]
-    ).with_structured_output(Summary).with_retry(
+    from open_deep_research.llm import get_llm
+    summarization_model = get_llm({
+        "configurable": {
+            "model": configurable.summarization_model,
+            "max_tokens": configurable.summarization_model_max_tokens,
+            "api_key": model_api_key,
+        }
+    }, tags=["langsmith:nostream"])
+    # Restore the bound methods that _resolve_chat_model's call-site previously chained.
+    summarization_model = summarization_model.with_structured_output(Summary).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
     )
     

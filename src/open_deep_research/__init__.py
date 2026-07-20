@@ -32,6 +32,9 @@ def _resolve_chat_model(config):
         kwargs["max_tokens"] = max_tokens
     if api_key:
         kwargs["api_key"] = api_key
+    tags = cfg.get("tags")
+    if tags:
+        kwargs["tags"] = tags
     return init_chat_model(**kwargs)
 
 

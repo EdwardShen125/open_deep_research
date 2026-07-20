@@ -63,34 +63,61 @@ class AgentInputState(MessagesState):
     """InputState is only 'messages'."""
 
 class AgentState(MessagesState):
-    """Main agent state containing messages and research data."""
-    
+    """Main agent state containing messages and research data.
+
+    Plan v2 adds 4 fields beyond the v1 baseline:
+      - evidence_units : EU pool across all researchers
+      - cited_report   : writer's structured claim↔EU output
+      - verification   : verifier engine output (rules 1/2/3/C)
+      - url_compliance : Rule 4 audit (page-level URL enforcement)
+    These default to empty / None so v1 callers still see the same surface.
+    """
+
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
     research_brief: Optional[str]
     raw_notes: Annotated[list[str], override_reducer] = []
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
+    evidence_units: Annotated[list, override_reducer] = []
+    cited_report: Optional[dict] = None
+    verification: Optional[dict] = None
+    url_compliance: Annotated[list, override_reducer] = []
+
 
 class SupervisorState(TypedDict):
-    """State for the supervisor that manages research tasks."""
-    
+
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
     research_brief: str
     notes: Annotated[list[str], override_reducer] = []
     research_iterations: int = 0
     raw_notes: Annotated[list[str], override_reducer] = []
+    # Plan v2: aggregated EU pool across all researchers. The supervisor
+    # aggregates per-researcher EUs here before final_report_generation
+    # consumes them. Without this field the supervisor's update would be
+    # dropped silently and the EU pool would never reach the writer.
+    evidence_units: Annotated[list, override_reducer] = []
 
 class ResearcherState(TypedDict):
     """State for individual researchers conducting research."""
-    
+
     researcher_messages: Annotated[list[MessageLikeRepresentation], operator.add]
     tool_call_iterations: int = 0
     research_topic: str
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
+    # Plan v2: per-researcher EU accumulator (forwarded via ResearcherOutputState).
+    # Without this, `researcher_tools` writes EU into the update dict but the
+    # researcher subgraph schema drops it on return, so the supervisor never
+    # sees the structured citations and final_report_generation runs with an
+    # empty EU pool — triggering the legacy fallback even when EUs were
+    # successfully extracted from Tavily observations.
+    evidence_units: Annotated[list, override_reducer] = []
 
 class ResearcherOutputState(BaseModel):
     """Output state from individual researchers."""
-    
+
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
+    # Plan v2: surface the EU pool so the supervisor can aggregate it from
+    # every parallel researcher invocation.
+    evidence_units: Annotated[list, override_reducer] = []
