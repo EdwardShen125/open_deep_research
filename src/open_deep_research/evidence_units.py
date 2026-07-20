@@ -73,6 +73,31 @@ from typing import Any, Iterable, Optional
 # =============================================================================
 # NumberBinding
 # =============================================================================
+# Numeric anchor extraction — handles CJK + English magnitudes
+# =============================================================================
+
+# English magnitude suffixes (case-insensitive). Order matters for the
+# alternation — longer tokens must come first so 'billion' beats 'b'.
+_EN_MAGNITUDE = {
+    "billion": 1e9,
+    "million": 1e6,
+    "trillion": 1e12,
+    "thousand": 1e3,
+    "bn": 1e9,
+    "mn": 1e6,
+    "m": 1e6,
+    "k": 1e3,
+    "b": 1e9,
+}
+
+# English currency unit keywords (used for NumberBinding.unit hint).
+_EN_CURRENCY = {
+    "USD": ("usd", "us$", "$", "dollar", "dollars"),
+    "EUR": ("eur", "€", "euro", "euros"),
+    "GBP": ("gbp", "£", "pound", "pounds"),
+    "CAD": ("cad", "c$", "canadian dollar", "canadian dollars"),
+    "RMB": ("rmb", "cny", "yuan", "renminbi"),
+}
 
 _NUMERIC_RE = re.compile(
     r"""
@@ -82,9 +107,20 @@ _NUMERIC_RE = re.compile(
         (?P<value2>\d[\d,]*(?:\.\d+)?)
     )?
     \s*
-    (?P<unit>[万亿千百百]|[%％])?             # trailing unit (Chinese magnitude OR %)
+    (?P<unit>[万亿千百]|[%％])?             # trailing CJK magnitude OR %
     """,
     re.VERBOSE,
+)
+# Secondary pass: English magnitude that follows a number but isn't a CJK unit.
+# Anchored to lookbehind for a number to avoid false hits like
+# "the company has million-dollar contracts".
+_EN_MAGNITUDE_RE = re.compile(
+    r"""
+    (?P<num>\d[\d,]*(?:\.\d+)?)             # the number (already matched once)
+    \s*
+    (?P<mag>billion|million|trillion|thousand|bn|mn|[mbk])\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 _CHINESE_UNITS = {
     "万": 1e4,
@@ -114,6 +150,26 @@ def _scale(num: Optional[float], unit: Optional[str]) -> Optional[float]:
     return num * _CHINESE_UNITS.get(unit, 1.0)
 
 
+def _scale_en(num: Optional[float], mag: Optional[str]) -> Optional[float]:
+    if num is None or not mag:
+        return num
+    return num * _EN_MAGNITUDE.get(mag.lower(), 1.0)
+
+
+def _detect_en_unit(text: str) -> Optional[str]:
+    """Detect a currency unit from English keywords (case-insensitive).
+    Returns one of USD/EUR/GBP/CAD/RMB or None.
+    """
+    if not text:
+        return None
+    low = text.lower()
+    for canonical, variants in _EN_CURRENCY.items():
+        for v in variants:
+            if v in low:
+                return canonical
+    return None
+
+
 @dataclass
 class NumberBinding:
     """One numeric anchor extracted from a piece of evidence."""
@@ -126,22 +182,28 @@ class NumberBinding:
 
     # -- parsing helpers --
     @classmethod
-    def from_text(cls, text: str) -> "NumberBinding":
+    def from_text(cls, text: str, *, context: Optional[str] = None) -> "NumberBinding":
         """Heuristically extract a single range from CJK / English text.
 
         For multi-number text, this returns the FIRST match. Use
         `extract_numbers` for a full sweep.
+
+        `context`: optional broader string to scan for magnitude / currency
+        markers that fall *outside* the numeric span itself. For example,
+        when `extract_numbers` is sweeping a sentence, the span may be just
+        "62" while the magnitude "million USD" sits in the surrounding
+        words. Pass the original sentence as `context` so we can find it.
         """
         m = _NUMERIC_RE.search(text or "")
         if not m:
             return cls(text=text, is_estimated=_has_estimate_marker(text))
+        scan_text = context if context is not None else (text or "")
         v1 = _to_float(m.group("value"))
         u1 = m.group("unit") or ""
         v2 = _to_float(m.group("value2"))
         # Apply the trailing unit only if it's a magnitude unit; for % we
         # don't multiply (it stays as a percentage).
         is_pct = u1 in ("%", "％")
-        u2 = u1  # unit tied to value1 or value2 same in our regex
         vmin = v1 if v1 is not None else None
         vmax = (_to_float(m.group("value2")) if m.group("value2") else vmin)
         if vmin is not None and not is_pct:
@@ -151,15 +213,36 @@ class NumberBinding:
                 pass
             if vmax is not None and v2 is not None:
                 vmax = _scale(v2, u1)
+            # English-magnitude pass — apply if a number was captured
+            # without a CJK unit (e.g. "62 million USD"). Scan the
+            # broader context so we find magnitude words that follow the
+            # span (the span itself may be just "62"). Scale BOTH ends
+            # unconditionally — the magnitude word applies to every
+            # number in the span (range or single).
+            #
+            # Guard: skip scaling for year-like values (1900-2099) since
+            # Tavily content often has "March 2024, brings ..." where a
+            # bare 2024 sits next to currency keywords without actually
+            # being a financial figure.
+            if not u1 and v1 is not None and not (1900 <= v1 <= 2099):
+                em = _EN_MAGNITUDE_RE.search(scan_text)
+                if em:
+                    mag = em.group("mag")
+                    vmin = _scale_en(vmin, mag)
+                    if vmax is not None:
+                        vmax = _scale_en(vmax, mag)
         if vmin is not None and vmax is not None and vmax < vmin:
             vmin, vmax = vmax, vmin
 
         # Decide semantic unit. Heuristic: presence of "美元" → USD,
-        # "人民币" / "元" → RMB, otherwise leave None.
-        if "美元" in text:
+        # "人民币" / "元" → RMB, English currency keywords via
+        # `_detect_en_unit`, otherwise leave None or CJK raw unit.
+        if "美元" in scan_text:
             unit = "USD"
-        elif "人民币" in text or "人民币" in text:
+        elif "人民币" in scan_text:
             unit = "RMB"
+        elif (en_unit := _detect_en_unit(scan_text)) is not None:
+            unit = en_unit
         elif u1 in _CHINESE_UNITS and not is_pct:
             # ambiguous CNY unless context says otherwise — keep raw unit
             unit = u1
@@ -187,12 +270,20 @@ def _has_estimate_marker(text: str) -> bool:
 
 
 def extract_numbers(text: str) -> list[NumberBinding]:
-    """Return every range discovered in `text`, ordered by appearance."""
+    """Return every range discovered in `text`, ordered by appearance.
+
+    `from_text` is called with the entire source string so the
+    English-magnitude / currency detection regexes can scan past the
+    numeric span itself (e.g. "62 million USD" → span "62" plus
+    context "million USD").
+    """
     out: list[NumberBinding] = []
     for m in _NUMERIC_RE.finditer(text or ""):
-        # Use the matched span as the number text
+        # Use the matched span as the number text, but pass the whole
+        # source string so `_EN_MAGNITUDE_RE` / `_detect_en_unit` can
+        # find magnitude/currency markers *after* the span.
         span = m.group(0).strip()
-        out.append(NumberBinding.from_text(span))
+        out.append(NumberBinding.from_text(span, context=text))
     return out
 
 

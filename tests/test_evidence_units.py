@@ -63,6 +63,78 @@ def test_extract_numbers_estimate_marker():
 
 
 # ---------------------------------------------------------------------------
+# English-magnitude + currency parsing (Plan v2 §未修 #2 closure)
+#
+# Tavily primarily returns English content. Without English magnitude
+# scaling, "$62 million" would land as the bare number 62 with unit None,
+# which the verifier treats as incomparable to any other anchor.
+# ---------------------------------------------------------------------------
+
+def test_number_binding_english_million_usd():
+    nb = NumberBinding.from_text("62 million USD")
+    assert nb.value_min == 62_000_000, f"expected 62M, got {nb.value_min}"
+    assert nb.value_max == 62_000_000
+    assert nb.unit == "USD", f"expected USD unit, got {nb.unit}"
+    print(f"  ✓ '62 million USD' → {nb.value_min:.0f} {nb.unit}")
+
+
+def test_number_binding_english_billion_range():
+    nb = NumberBinding.from_text("Klue raised 1.5-2 billion dollars in funding")
+    assert nb.value_min is not None and nb.value_max is not None
+    assert nb.value_min == 1_500_000_000, f"expected 1.5B, got {nb.value_min}"
+    assert nb.value_max == 2_000_000_000, f"expected 2B, got {nb.value_max}"
+    assert nb.unit == "USD"
+    print(f"  ✓ '1.5-2 billion dollars' → {nb.value_min:.0f}-{nb.value_max:.0f} {nb.unit}")
+
+
+def test_number_binding_english_short_magnitude_m_and_b():
+    nb = NumberBinding.from_text("ARR reached $20M in 2024")
+    assert nb.value_min == 20_000_000, f"$20M expected 20M, got {nb.value_min}"
+    assert nb.unit == "USD"
+    print(f"  ✓ '$20M' → {nb.value_min:.0f} {nb.unit}")
+
+
+def test_number_binding_english_thousand():
+    nb = NumberBinding.from_text("user base grew to 250 thousand")
+    assert nb.value_min == 250_000, f"250K expected, got {nb.value_min}"
+    print(f"  ✓ '250 thousand' → {nb.value_min:.0f}")
+
+
+def test_number_binding_english_no_magnitude_unchanged():
+    """A bare number with no magnitude must keep its raw value (no inflation)."""
+    nb = NumberBinding.from_text("Klue was founded in 2014")
+    assert nb.value_min == 2014.0, f"year 2014 must stay raw, got {nb.value_min}"
+    print(f"  ✓ bare year '2014' kept as 2014 (no magnitude inflation)")
+
+
+def test_number_binding_english_euros():
+    nb = NumberBinding.from_text("€50 million Series A")
+    assert nb.value_min == 50_000_000, f"50M EUR expected, got {nb.value_min}"
+    assert nb.unit == "EUR", f"expected EUR, got {nb.unit}"
+    print(f"  ✓ '€50 million' → {nb.value_min:.0f} {nb.unit}")
+
+
+def test_number_binding_english_pounds():
+    nb = NumberBinding.from_text("London-based startup raised £100k")
+    assert nb.value_min == 100_000
+    assert nb.unit == "GBP"
+    print(f"  ✓ '£100k' → {nb.value_min:.0f} {nb.unit}")
+
+
+def test_extract_numbers_avoids_double_counting_year_when_magnitude_present():
+    """Regression: '62 million USD' should produce ONE NumberBinding at 62M,
+    not two (one for '62', one for any adjacent number)."""
+    nums = extract_numbers("Klue raised 62 million USD in 2024 funding round")
+    # Filter to only those with English magnitude-scaled value
+    scaled = [n for n in nums if n.value_min and n.value_min >= 1_000_000]
+    assert len(scaled) >= 1, f"expected ≥1 scaled anchor, got {nums}"
+    assert any(n.value_min == 62_000_000 for n in scaled), (
+        f"expected 62M anchor, got values: {[n.value_min for n in nums]}"
+    )
+    print(f"  ✓ '62 million USD in 2024' → {len(nums)} anchors, with 62M preserved")
+
+
+# ---------------------------------------------------------------------------
 # EntityRef
 # ---------------------------------------------------------------------------
 
@@ -212,6 +284,15 @@ def main():
         ("number_binding_no_match", test_number_binding_no_match),
         ("extract_numbers_multi", test_extract_numbers_multi),
         ("extract_numbers_estimate_marker", test_extract_numbers_estimate_marker),
+        ("number_binding_english_million_usd", test_number_binding_english_million_usd),
+        ("number_binding_english_billion_range", test_number_binding_english_billion_range),
+        ("number_binding_english_short_magnitude_m_and_b", test_number_binding_english_short_magnitude_m_and_b),
+        ("number_binding_english_thousand", test_number_binding_english_thousand),
+        ("number_binding_english_no_magnitude_unchanged", test_number_binding_english_no_magnitude_unchanged),
+        ("number_binding_english_euros", test_number_binding_english_euros),
+        ("number_binding_english_pounds", test_number_binding_english_pounds),
+        ("extract_numbers_avoids_double_counting_year_when_magnitude_present",
+         test_extract_numbers_avoids_double_counting_year_when_magnitude_present),
         ("entity_ref_roundtrip", test_entity_ref_roundtrip),
         ("eu_constructs_with_minimum", test_eu_constructs_with_minimum),
         ("eu_rejects_empty_claim", test_eu_rejects_empty_claim),

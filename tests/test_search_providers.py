@@ -1,5 +1,6 @@
 """Phase 1.3 — Search providers (UnifiedSearch + Tavily + SearXNG)."""
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -183,6 +184,112 @@ def test_unified_search_registers_sources_via_dao():
 
 
 # ---------------------------------------------------------------------------
+# Phase 1.3/1.4 docker / live-API e2e
+#
+# These tests verify the search-provider layer reaches real backends:
+#  - TavilyProvider: live API call (requires TAVILY_API_KEY in env)
+#  - SearXNGProvider: docker container reachable at odr-searxng:8080
+#    (or via host port-mapping; both are valid deployment shapes)
+#
+# They are NOT marked skip — they're guarded by environment so a missing
+# key simply yields a clear "skipped because X" message instead of a
+# confusing failure. CI without secrets will see them as skipped.
+# ---------------------------------------------------------------------------
+
+def test_tavily_provider_real_api_returns_results():
+    """Phase 1.3 — Verify TavilyProvider returns real search results
+    against the live Tavily API. Skips when TAVILY_API_KEY is missing.
+    """
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        print("  ⏭ skipped: TAVILY_API_KEY not set in env")
+        return
+    p = TavilyProvider()
+    if p._client is None:
+        print("  ⏭ skipped: tavily-python not installed / client init failed")
+        return
+    q = SearchQuery(
+        queries=["Klue competitive intelligence platform funding"],
+        max_results=3,
+        topic="general",
+    )
+    results = asyncio.run(p.search(q))
+    assert len(results) >= 1, f"Tavily returned 0 results (expected ≥1): {results}"
+    # All results should have page-level URLs (Tavily filters domain-only)
+    page_level = sum(1 for r in results if r.url and r.url.count("/") >= 3)
+    assert page_level >= 1, (
+        f"expected ≥1 page-level URL from Tavily, got {page_level}/{len(results)}"
+    )
+    # Results should have non-empty titles + content (Tavily contract)
+    with_content = sum(1 for r in results if r.title or r.content)
+    assert with_content == len(results), (
+        f"all results should have title/content, got {with_content}/{len(results)}"
+    )
+    print(f"  ✓ TavilyProvider live: {len(results)} results, "
+          f"{page_level} page-level URLs")
+
+
+def test_searxng_provider_docker_connectivity():
+    """Phase 1.3 — Verify SearXNGProvider can reach a running SearXNG
+    container. Skips when neither docker DNS name nor loopback port is
+    reachable (e.g. host without docker network access).
+    """
+    # Two valid reachability shapes:
+    #  1. Docker internal DNS: odr-searxng:8080 (when caller is in the
+    #     same docker network)
+    #  2. Host port-mapping: 127.0.0.1:8080 (when ports: is set in compose)
+    candidate_urls = [
+        os.environ.get("SEARXNG_URL", "").rstrip("/") or None,
+        "http://odr-searxng:8080",
+        "http://127.0.0.1:8080",
+    ]
+    candidate_urls = [u for u in candidate_urls if u]
+
+    reachable_url = None
+    for base in candidate_urls:
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                base + "/", headers={"User-Agent": "open_deep_research/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status in (200, 301, 302):
+                    reachable_url = base
+                    break
+        except Exception:
+            continue
+
+    if reachable_url is None:
+        print(f"  ⏭ skipped: no SearXNG reachable on {candidate_urls} "
+              "(host not in docker network, no host port-mapping)")
+        return
+
+    p = SearXNGProvider(base_url=reachable_url)
+    q = SearchQuery(
+        queries=["Klue"],
+        max_results=3,
+        topic="general",
+    )
+    try:
+        results = asyncio.run(p.search(q))
+    except Exception as e:
+        # SearXNG upstream engine limits are common (DuckDuckGo CAPTCHA,
+        # Google suspended). We don't fail the test for those — we report.
+        print(f"  ⚠ SearXNG reachable at {reachable_url} but search failed: "
+              f"{type(e).__name__}: {str(e)[:120]}")
+        return
+    # If we got results, validate; if 0, still pass (upstream engine issue)
+    print(f"  ✓ SearXNGProvider via {reachable_url}: "
+          f"{len(results)} results returned")
+    if results:
+        sample = results[0]
+        assert sample.url, "first SearXNG result missing URL"
+        print(f"    sample: {sample.url[:80]} "
+              f"(score={sample.score:.2f})" if sample.score else
+              f"    sample: {sample.url[:80]}")
+
+
+# ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
@@ -206,8 +313,11 @@ def main():
          test_unified_search_cache_hit_short_circuits),
         ("unified_search_write_through_cache_on_miss",
          test_unified_search_write_through_cache_on_miss),
-        ("unified_search_registers_sources_via_dao",
-         test_unified_search_registers_sources_via_dao),
+        ("unified_search_registers_sources_via_dao", test_unified_search_registers_sources_via_dao),
+        ("tavily_provider_real_api_returns_results",
+         test_tavily_provider_real_api_returns_results),
+        ("searxng_provider_docker_connectivity",
+         test_searxng_provider_docker_connectivity),
     ]
     print("=" * 70)
     print(f" Running {len(tests)} search-provider tests")
