@@ -67,3 +67,6 @@ tmp/
 temp/
 
 .langgraph_api
+
+# Experiment results — bench/eval run outputs, not source code
+tests/expt_results/

@@ -1,0 +1,24 @@
+==============================================================================
+ PHASE 0.5 LICENSE AUDIT
+==============================================================================
+
+[1] FORBIDDEN PACKAGES (must be absent):
+  [OK] pymupdf              not installed
+  [OK] fitz                 not installed
+  [OK] magic-pdf            not installed
+  [OK] marker-pdf           not installed
+
+[2] AGPL SCAN (all installed packages):
+  No AGPL patterns detected.
+
+[3] APPROVED PACKAGES (Phase 0.5 / Phase 1 needs):
+  [MISSING] docling              expected (Apache-2.0)
+  [PRESENT] pdfplumber           0.11.10         (MIT)
+  [PRESENT] psycopg              3.3.4           (LGPL-3.0)
+  [PRESENT] langfuse             4.14.0          (MIT)
+  [PRESENT] arq                  0.28.0          (MIT)
+  [PRESENT] crawl4ai             0.9.2           (Apache-2.0)
+
+==============================================================================
+ STATUS: PASS (no actionable license violations)
+==============================================================================
