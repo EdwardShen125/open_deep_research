@@ -7,6 +7,13 @@ from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
 
+# Safety guard: any single observation returning more than this many EU
+# gets truncated with a warning. Picked high enough to allow legitimate
+# large batches (Tavily can return ~50 EU per query) but low enough to
+# keep dedup + downstream processing O(n) friendly. EDR v8 hit 23K EU
+# in a single observation pool because of unbounded per-query extraction.
+MAX_EU_PER_OBSERVATION = 5000
+
 from open_deep_research import create_configurable_model
 from langchain_core.messages import (
     AIMessage,
@@ -279,6 +286,13 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
     # cap is reached. Hard cap = max_researcher_iterations - 1: this still
     # allows the configured budget of ConductResearch rounds but prevents
     # runaway past it. See state.py for the corresponding reducer change.
+    # Hard cap is one step below the configured budget, so the supervisor
+    # always gets its full N-1 decision rounds before forced convergence.
+    # Previously this was hard-pinned at 2 (`min(max-1, 2)`) to combat the
+    # EDR v4 runaway supervisor loop; with the O(n) EU dedup fix below we
+    # can honor the user's configurable max again. The hard cap is still a
+    # last-resort guard against a supervisor that keeps emitting new
+    # ConductResearch calls without ever calling ResearchComplete.
     hard_iteration_cap = max(configurable.max_researcher_iterations - 1, 1)
     exceeded_allowed_iterations = research_iterations > configurable.max_researcher_iterations
     force_end_at_cap = research_iterations >= hard_iteration_cap
@@ -294,6 +308,13 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
     # synthesize a ResearchComplete-style exit so final_report_generation
     # is reached. We log a warning when this kicks in so operators can
     # see the convergence failure in production.
+    #
+    # At ri >= hardcap, the supervisor ALWAYS ends this round — no
+    # `not actionable_calls` escape hatch. Even if it emitted fresh
+    # ConductResearch calls, those would re-enter the loop and increment
+    # ri again, runaway past the configured budget. The actionable calls
+    # (if any) are dropped silently in this branch; in practice the
+    # supervisor uses the prior iteration's gather results.
     if (
         exceeded_allowed_iterations
         or no_tool_calls
@@ -412,21 +433,56 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             # researcher_tools. Each researcher subgraph returns its own
             # EU list; supervisor aggregates across the parallel units so
             # final_report_generation sees a single unified pool.
+            # O(n) dedup via set; the previous O(n^2) `any()` scan deadlocked
+            # the supervisor on the EDR v8 run with 23K EU (~3.8 hours to
+            # finish). The Pydantic `content_hash` @property triggers
+            # json.dumps + SHA256 inside evidence_units.py:350, so caching the
+            # computed hash on the EU was not an option here. An O(n) set-based
+            # scan keeps the cost bounded at one dict lookup per EU.
+            #
+            # Regression guard: if a single observation returns more than
+            # MAX_EU_PER_OBSERVATION EU, log a warning and truncate. This
+            # protects against future regressions that would re-introduce
+            # pathological EU pools (e.g. Tavily returning thousands of chunks
+            # for one search).
+            seen_hashes: set[str] = set()
             eus_concat: list = []
+            total_in = 0
+            truncated_obs = 0
             for observation in tool_results:
-                for eu in observation.get("evidence_units") or []:
-                    # Avoid re-emitting identical EUs across iterations.
+                obs_eus = observation.get("evidence_units") or []
+                if len(obs_eus) > MAX_EU_PER_OBSERVATION:
+                    logger.warning(
+                        "supervisor_tools: observation returned %d EU (>%d), "
+                        "truncating to first %d to keep dedup bounded",
+                        len(obs_eus), MAX_EU_PER_OBSERVATION, MAX_EU_PER_OBSERVATION,
+                    )
+                    obs_eus = obs_eus[:MAX_EU_PER_OBSERVATION]
+                    truncated_obs += 1
+                for eu in obs_eus:
+                    total_in += 1
                     if isinstance(eu, dict):
-                        key = eu.get("content_hash") or eu.get("text")
+                        key = eu.get("content_hash")
+                        if not key:
+                            key = eu.get("text")
                     else:
-                        key = getattr(eu, "content_hash", None) or getattr(eu, "text", None)
-                    if key and any(
-                        (isinstance(x, dict) and (x.get("content_hash") or x.get("text")) == key)
-                        or (not isinstance(x, dict) and (getattr(x, "content_hash", None) or getattr(x, "text", None)) == key)
-                        for x in eus_concat
-                    ):
+                        # Pydantic EvidenceUnit: getattr on @property triggers
+                        # json.dumps; only call when needed (and the comparison
+                        # path is fast-path below).
+                        key = getattr(eu, "content_hash", None)
+                        if not key:
+                            key = getattr(eu, "text", None)
+                    if key in seen_hashes:
                         continue
+                    if key:
+                        seen_hashes.add(key)
                     eus_concat.append(eu)
+            if truncated_obs:
+                logger.warning(
+                    "supervisor_tools: dedup summary — total_in=%d unique=%d "
+                    "truncated_observations=%d",
+                    total_in, len(eus_concat), truncated_obs,
+                )
             if eus_concat:
                 update_payload["evidence_units"] = eus_concat
                 
