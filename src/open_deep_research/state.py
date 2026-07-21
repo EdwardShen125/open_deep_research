@@ -89,7 +89,15 @@ class SupervisorState(TypedDict):
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
     research_brief: str
     notes: Annotated[list[str], override_reducer] = []
-    research_iterations: int = 0
+    # Phase 2 / supervisor-convergence: explicit operator.add reducer so the
+    # counter accumulates across supervisor→supervisor_tools loops. Without
+    # this Annotated reducer, LangGraph's default last-write-wins behavior on
+    # plain int fields caused research_iterations to silently reset to 0 on
+    # every Command.update round-trip — making the supervisor_tools
+    # exceeded_allowed_iterations guard never fire (and the supervisor ran
+    # 45+ times in the EDR v4 run before timeout). See deep_researcher.py
+    # supervisor_tools for the corresponding enforcement.
+    research_iterations: Annotated[int, operator.add] = 0
     raw_notes: Annotated[list[str], override_reducer] = []
     # Plan v2: aggregated EU pool across all researchers. The supervisor
     # aggregates per-researcher EUs here before final_report_generation

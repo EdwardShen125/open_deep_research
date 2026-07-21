@@ -1,8 +1,11 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import logging
 import re
 from typing import Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 from open_deep_research import create_configurable_model
 from langchain_core.messages import (
@@ -230,12 +233,18 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
     supervisor_messages = state.get("supervisor_messages", [])
     response = await research_model.ainvoke(supervisor_messages)
     
-    # Step 3: Update state and proceed to tool execution
+    # Step 3: Update state and proceed to tool execution.
+    # research_iterations uses Annotated[operator.add] reducer (see state.py),
+    # so we write a delta of 1 and the reducer accumulates across the
+    # supervisor→supervisor_tools loop. Previously we computed
+    # state.get("research_iterations", 0) + 1, which double-counted (the
+    # reducer was already adding 1) — turning effective limit into 2x
+    # max_researcher_iterations. Writing just 1 keeps the limit honest.
     return Command(
         goto="supervisor_tools",
         update={
             "supervisor_messages": [response],
-            "research_iterations": state.get("research_iterations", 0) + 1
+            "research_iterations": 1,
         }
     )
 
@@ -260,16 +269,47 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
     research_iterations = state.get("research_iterations", 0)
     most_recent_message = supervisor_messages[-1]
     
-    # Define exit criteria for research phase
+    # Define exit criteria for research phase.
+    # Phase 2 / supervisor-convergence fix: the supervisor was running 45+
+    # times in the EDR v4 run because (a) the state field had no reducer
+    # so it reset on each round-trip and (b) the comparison was strict >.
+    # We keep `>` semantics (so a single research iteration can produce a
+    # batch of ConductResearch calls) but add a HARD CAP one step below the
+    # configured limit so the supervisor must always converge before the
+    # cap is reached. Hard cap = max_researcher_iterations - 1: this still
+    # allows the configured budget of ConductResearch rounds but prevents
+    # runaway past it. See state.py for the corresponding reducer change.
+    hard_iteration_cap = max(configurable.max_researcher_iterations - 1, 1)
     exceeded_allowed_iterations = research_iterations > configurable.max_researcher_iterations
+    force_end_at_cap = research_iterations >= hard_iteration_cap
     no_tool_calls = not most_recent_message.tool_calls
     research_complete_tool_call = any(
-        tool_call["name"] == "ResearchComplete" 
+        tool_call["name"] == "ResearchComplete"
         for tool_call in most_recent_message.tool_calls
     )
-    
-    # Exit if any termination condition is met
-    if exceeded_allowed_iterations or no_tool_calls or research_complete_tool_call:
+
+    # Exit if any termination condition is met. `force_end_at_cap` is the
+    # last-resort guard: even if the supervisor keeps emitting new
+    # ConductResearch calls after the configured iteration budget, we
+    # synthesize a ResearchComplete-style exit so final_report_generation
+    # is reached. We log a warning when this kicks in so operators can
+    # see the convergence failure in production.
+    if (
+        exceeded_allowed_iterations
+        or no_tool_calls
+        or research_complete_tool_call
+        or force_end_at_cap
+    ):
+        if force_end_at_cap and not research_complete_tool_call:
+            logger.warning(
+                "supervisor_tools: forcing END at research_iterations=%d "
+                "(hard_cap=%d, max=%d, configured=%d). Supervisor did not "
+                "emit ResearchComplete — synthesized exit.",
+                research_iterations,
+                hard_iteration_cap,
+                configurable.max_researcher_iterations,
+                configurable.max_researcher_iterations,
+            )
         return Command(
             goto=END,
             update={
