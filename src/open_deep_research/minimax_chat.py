@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 from typing import Any, AsyncIterator, Iterator, List, Optional, Tuple
 
 import httpx
+
+from open_deep_research.minimax_rate_limit import RPMRateLimiter
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
@@ -199,6 +202,50 @@ class ChatMiniMax(BaseChatModel):
         if self._async_client is None:
             self._async_client = httpx.AsyncClient(timeout=self.timeout)
         return self._async_client
+
+    # ------------------------------------------------------------------
+    # Rate limiting (RPM)
+    # ------------------------------------------------------------------
+    def _rate_limiter(self) -> RPMRateLimiter:
+        """Return the process-wide RPMRateLimiter singleton.
+
+        All ChatMiniMax instances share one budget. Default 30 RPM / 8
+        concurrent, overridable via ``MINIMAX_RPM_LIMIT`` and
+        ``MINIMAX_MAX_CONCURRENT`` env vars.
+        """
+        return RPMRateLimiter.get()
+
+    @staticmethod
+    async def _async_acquire_rate_limit() -> RPMRateLimiter:
+        """Async helper: acquire a rate-limit permit and return the limiter
+        (caller is responsible for releasing via ``limiter.release()`` or
+        by using ``async with``).
+        """
+        lim = RPMRateLimiter.get()
+        await lim.acquire()
+        return lim
+
+    @staticmethod
+    def _sync_acquire_rate_limit_blocking() -> RPMRateLimiter:
+        """Sync helper for ``_generate``/``_stream``: drive the async
+        ``acquire`` via a fresh event loop. The sync path is rarely used
+        (LangGraph prefers async) but we still throttle it for safety.
+        """
+        lim = RPMRateLimiter.get()
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're somehow inside a running loop (rare for sync
+                # _generate), fall back to a thread.
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    ex.submit(lambda: asyncio.run(lim.acquire())).result()
+            else:
+                loop.run_until_complete(lim.acquire())
+        except RuntimeError:
+            # No loop at all — make one.
+            asyncio.run(lim.acquire())
+        return lim
 
     # ------------------------------------------------------------------
     # Structured output: use function_calling (tool_use) when supported,
@@ -403,7 +450,53 @@ class ChatMiniMax(BaseChatModel):
 
         return payload
 
-    def _completion(self, payload: dict) -> dict:
+    # ------------------------------------------------------------------
+    # 429 / 2062 retry helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_retryable_response(status_code: int, body_text: str) -> bool:
+        """Return True if the response is a rate-limit error we should retry.
+
+        Triggers:
+        - HTTP 429 (Too Many Requests) — MiniMax returns error code 2062
+          in the body, but the status is the standard signal.
+        - HTTP 5xx (server errors) — transient.
+        - HTTP 408 (Request Timeout).
+        """
+        if status_code == 429 or status_code == 408:
+            return True
+        if 500 <= status_code < 600:
+            return True
+        # Some MiniMax errors arrive as 200 with error code 2062 inside the body.
+        if status_code == 200 and ("2062" in body_text or "rate_limit" in body_text.lower()):
+            return True
+        return False
+
+    @staticmethod
+    def _parse_retry_after(resp) -> Optional[float]:
+        """Extract ``Retry-After`` header value (seconds). Returns None if absent."""
+        ra = resp.headers.get("retry-after")
+        if not ra:
+            return None
+        try:
+            return float(ra)
+        except ValueError:
+            # Could be an HTTP-date; conservative cap at 60s.
+            return 60.0
+
+    def _completion_with_retry(self, payload: dict) -> dict:
+        """Sync POST with 429 / 5xx retry + exponential backoff.
+
+        Backoff: ``Retry-After`` header if present, else
+        ``min(2 ** attempt, 16)`` seconds. Max 5 attempts.
+
+        Note: rate-limiting (RPM) is handled at the ``_generate`` /
+        ``_agenerate`` / ``_stream`` / ``_astream`` layer so the HTTP
+        helper stays a thin transport wrapper. Callers that invoke
+        ``_completion`` directly (without going through those public
+        methods) will bypass the limiter — that's intentional.
+        """
+        max_attempts = 5
         headers = {
             "Content-Type": "application/json",
             "anthropic-version": self.anthropic_version,
@@ -411,14 +504,40 @@ class ChatMiniMax(BaseChatModel):
         }
         url = f"{self.api_base.rstrip('/')}/v1/messages"
         client = self._get_client()
-        resp = client.post(url, headers=headers, json=payload)
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"MiniMax API error {resp.status_code}: {resp.text[:500]}"
+        for attempt in range(max_attempts):
+            resp = client.post(url, headers=headers, json=payload)
+            if not self._is_retryable_response(resp.status_code, resp.text):
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"MiniMax API error {resp.status_code}: {resp.text[:500]}"
+                    )
+                return resp.json()
+            # Retryable — back off.
+            retry_after = self._parse_retry_after(resp)
+            backoff = (
+                retry_after if retry_after is not None
+                else min(2 ** attempt, 16.0)
             )
-        return resp.json()
+            if attempt == max_attempts - 1:
+                # Final attempt failed.
+                raise RuntimeError(
+                    f"MiniMax API rate-limited {max_attempts}x "
+                    f"(last status {resp.status_code}, "
+                    f"Retry-After={retry_after}, body={resp.text[:300]}): "
+                    f"giving up"
+                )
+            import time as _time
+            _time.sleep(backoff)
+        # Unreachable, but for type checker:
+        raise RuntimeError("retry loop exited without resolution")
 
-    async def _acompletion(self, payload: dict) -> dict:
+    async def _acompletion_with_retry(self, payload: dict) -> dict:
+        """Async POST with 429 / 5xx retry + exponential backoff.
+
+        Note: rate-limiting (RPM) is handled at the ``_astream`` /
+        ``_agenerate`` layer so this helper stays a thin transport.
+        """
+        max_attempts = 5
         headers = {
             "Content-Type": "application/json",
             "anthropic-version": self.anthropic_version,
@@ -426,12 +545,36 @@ class ChatMiniMax(BaseChatModel):
         }
         url = f"{self.api_base.rstrip('/')}/v1/messages"
         client = self._get_async_client()
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"MiniMax API error {resp.status_code}: {resp.text[:500]}"
+        for attempt in range(max_attempts):
+            resp = await client.post(url, headers=headers, json=payload)
+            if not self._is_retryable_response(resp.status_code, resp.text):
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"MiniMax API error {resp.status_code}: {resp.text[:500]}"
+                    )
+                return resp.json()
+            retry_after = self._parse_retry_after(resp)
+            backoff = (
+                retry_after if retry_after is not None
+                else min(2 ** attempt, 16.0)
             )
-        return resp.json()
+            if attempt == max_attempts - 1:
+                raise RuntimeError(
+                    f"MiniMax API rate-limited {max_attempts}x "
+                    f"(last status {resp.status_code}, "
+                    f"Retry-After={retry_after}, body={resp.text[:300]}): "
+                    f"giving up"
+                )
+            await asyncio.sleep(backoff)
+        raise RuntimeError("retry loop exited without resolution")
+
+    def _completion(self, payload: dict) -> dict:
+        """Sync POST — delegates to ``_completion_with_retry``."""
+        return self._completion_with_retry(payload)
+
+    async def _acompletion(self, payload: dict) -> dict:
+        """Async POST — delegates to ``_acompletion_with_retry``."""
+        return await self._acompletion_with_retry(payload)
 
     def _generate(
         self,
@@ -440,11 +583,15 @@ class ChatMiniMax(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        payload = self._build_payload(messages, stop=stop, **kwargs)
-        data = self._completion(payload)
-        ai_msg = _parse_anthropic_response(data)
-        gen = ChatGeneration(message=ai_msg)
-        return ChatResult(generations=[gen])
+        limiter = self._sync_acquire_rate_limit_blocking()
+        try:
+            payload = self._build_payload(messages, stop=stop, **kwargs)
+            data = self._completion(payload)
+            ai_msg = _parse_anthropic_response(data)
+            gen = ChatGeneration(message=ai_msg)
+            return ChatResult(generations=[gen])
+        finally:
+            limiter.release()
 
     async def _agenerate(
         self,
@@ -453,11 +600,15 @@ class ChatMiniMax(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        payload = self._build_payload(messages, stop=stop, **kwargs)
-        data = await self._acompletion(payload)
-        ai_msg = _parse_anthropic_response(data)
-        gen = ChatGeneration(message=ai_msg)
-        return ChatResult(generations=[gen])
+        limiter = await self._async_acquire_rate_limit()
+        try:
+            payload = self._build_payload(messages, stop=stop, **kwargs)
+            data = await self._acompletion(payload)
+            ai_msg = _parse_anthropic_response(data)
+            gen = ChatGeneration(message=ai_msg)
+            return ChatResult(generations=[gen])
+        finally:
+            limiter.release()
 
     def bind_tools(self, tools, **kwargs):
         """Bind tools (LangChain standard interface).
@@ -529,40 +680,44 @@ class ChatMiniMax(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        payload = self._build_payload(messages, stop=stop, **kwargs)
-        if hasattr(self, "_bound_tools") and self._bound_tools:
-            payload["tools"] = self._bound_tools
-        payload["stream"] = True
+        limiter = self._sync_acquire_rate_limit_blocking()
+        try:
+            payload = self._build_payload(messages, stop=stop, **kwargs)
+            if hasattr(self, "_bound_tools") and self._bound_tools:
+                payload["tools"] = self._bound_tools
+            payload["stream"] = True
 
-        headers = {
-            "Content-Type": "application/json",
-            "anthropic-version": self.anthropic_version,
-            "x-api-key": self._resolved_api_key(),
-        }
-        url = f"{self.api_base.rstrip('/')}/v1/messages"
+            headers = {
+                "Content-Type": "application/json",
+                "anthropic-version": self.anthropic_version,
+                "x-api-key": self._resolved_api_key(),
+            }
+            url = f"{self.api_base.rstrip('/')}/v1/messages"
 
-        with self._get_client().stream("POST", url, headers=headers, json=payload) as resp:
-            for line in resp.iter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[len("data: "):].strip()
-                if not data_str or data_str == "[DONE]":
-                    continue
-                try:
-                    event = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                ev_type = event.get("type")
-                if ev_type == "content_block_delta":
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        text = delta.get("text", "")
-                        chunk = ChatGenerationChunk(
-                            message=AIMessageChunk(content=text)
-                        )
-                        if run_manager:
-                            run_manager.on_llm_new_token(text)
-                        yield chunk
+            with self._get_client().stream("POST", url, headers=headers, json=payload) as resp:
+                for line in resp.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[len("data: "):].strip()
+                    if not data_str or data_str == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    ev_type = event.get("type")
+                    if ev_type == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            chunk = ChatGenerationChunk(
+                                message=AIMessageChunk(content=text)
+                            )
+                            if run_manager:
+                                run_manager.on_llm_new_token(text)
+                            yield chunk
+        finally:
+            limiter.release()
 
     async def _astream(
         self,
@@ -571,6 +726,65 @@ class ChatMiniMax(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
+        # RPM rate limit: hold a permit for the entire duration of the
+        # streaming HTTP roundtrip. Without this, a supervisor node that
+        # fires off 5 ConductResearch tool calls in parallel would all
+        # enter _astream simultaneously and burst past MiniMax's RPM cap,
+        # returning 429 / error code 2062 mid-stream.
+        limiter = await self._async_acquire_rate_limit()
+        try:
+            # 429 / 5xx retry wrapper. The inner async generator is
+            # _astream_once(); if it raises a 429-class error during the
+            # pre-stream handshake (httpx raises HTTPStatusError on
+            # enter), we back off and try again. Once the stream body
+            # has started flowing, mid-stream 429s are rare — MiniMax
+            # tends to reject at the response-headers level.
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                try:
+                    async for chunk in self._astream_once(
+                        messages, stop=stop, run_manager=run_manager, **kwargs
+                    ):
+                        yield chunk
+                    return  # success
+                except httpx.HTTPStatusError as e:
+                    if (
+                        e.response is not None
+                        and self._is_retryable_response(e.response.status_code, "")
+                    ):
+                        retry_after = self._parse_retry_after(e.response)
+                        backoff = (
+                            retry_after if retry_after is not None
+                            else min(2 ** attempt, 16.0)
+                        )
+                        if attempt == max_attempts - 1:
+                            raise RuntimeError(
+                                f"MiniMax stream rate-limited {max_attempts}x "
+                                f"(last status {e.response.status_code}): giving up"
+                            ) from e
+                        await asyncio.sleep(backoff)
+                        continue
+                    raise
+                except RuntimeError as e:
+                    # Some MiniMax errors come wrapped as RuntimeError with
+                    # status code text inside the message.
+                    msg = str(e)
+                    if "429" in msg and attempt < max_attempts - 1:
+                        backoff = min(2 ** attempt, 16.0)
+                        await asyncio.sleep(backoff)
+                        continue
+                    raise
+        finally:
+            limiter.release()
+
+    async def _astream_once(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        """Single-shot streaming call (no 429 retry). Wrapped by _astream."""
         payload = self._build_payload(messages, stop=stop, **kwargs)
         if hasattr(self, "_bound_tools") and self._bound_tools:
             payload["tools"] = self._bound_tools
