@@ -583,6 +583,22 @@ class ChatMiniMax(BaseChatModel):
         }
         url = f"{self.api_base.rstrip('/')}/v1/messages"
 
+        # Plan v2 fix (UNSOURCED root cause): streaming responses from
+        # MiniMax's Anthropic-compatible endpoint can include tool_use
+        # blocks. Previously only `text_delta` chunks were yielded, so
+        # every tool_use block was silently dropped and `tool_calls` ended
+        # up empty in the final AIMessage — which made supervisor_tools
+        # short-circuit to END without ever invoking the researcher
+        # subgraph. We now accumulate per-block state and yield a final
+        # AIMessageChunk carrying all reconstructed tool_calls.
+        from langchain_core.messages import AIMessageChunk
+
+        blocks: List[dict] = []  # one entry per content block, by index
+        # Text deltas are streamed as they arrive for live progress.
+        # Tool_use deltas are accumulated and only emitted as one chunk
+        # at content_block_stop, otherwise LangChain sees incomplete
+        # tool_call ids.
+
         async with self._get_async_client().stream(
             "POST", url, headers=headers, json=payload
         ) as resp:
@@ -597,13 +613,61 @@ class ChatMiniMax(BaseChatModel):
                 except json.JSONDecodeError:
                     continue
                 ev_type = event.get("type")
-                if ev_type == "content_block_delta":
+                if ev_type == "content_block_start":
+                    block = event.get("content_block") or {}
+                    blocks.append({
+                        "type": block.get("type"),
+                        "raw": dict(block),
+                        "text_buf": "",
+                        "input_buf": "",
+                        "id": block.get("id"),
+                        "name": block.get("name"),
+                    })
+                elif ev_type == "content_block_delta":
+                    idx = event.get("index", len(blocks) - 1)
                     delta = event.get("delta", {})
+                    if idx < 0 or idx >= len(blocks):
+                        continue
                     if delta.get("type") == "text_delta":
                         text = delta.get("text", "")
+                        blocks[idx]["text_buf"] += text
                         chunk = ChatGenerationChunk(
                             message=AIMessageChunk(content=text)
                         )
                         if run_manager:
                             await run_manager.on_llm_new_token(text)
                         yield chunk
+                    elif delta.get("type") == "input_json_delta":
+                        blocks[idx]["input_buf"] += delta.get("partial_json", "")
+                elif ev_type == "content_block_stop":
+                    # Emit a tool_calls chunk if this block is a tool_use.
+                    if blocks:
+                        last_block = blocks[-1]
+                        if last_block.get("type") == "tool_use":
+                            args_str = last_block.get("input_buf", "")
+                            try:
+                                args_obj = json.loads(args_str) if args_str else {}
+                            except json.JSONDecodeError:
+                                args_obj = {}
+                            tool_calls_payload = [{
+                                "id": last_block.get("id") or "",
+                                "name": last_block.get("name") or "",
+                                "args": args_obj,
+                            }]
+                            # OpenAI-style mirror in additional_kwargs.
+                            openai_style = [{
+                                "id": tool_calls_payload[0]["id"],
+                                "function": {
+                                    "name": tool_calls_payload[0]["name"],
+                                    "arguments": json.dumps(args_obj, ensure_ascii=False),
+                                },
+                                "type": "function",
+                            }]
+                            chunk = ChatGenerationChunk(
+                                message=AIMessageChunk(
+                                    content="",
+                                    additional_kwargs={"tool_calls": openai_style},
+                                    tool_calls=tool_calls_payload,
+                                )
+                            )
+                            yield chunk

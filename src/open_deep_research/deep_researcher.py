@@ -213,14 +213,19 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
     # Available tools: research delegation, completion signaling, and strategic thinking
     lead_researcher_tools = [ConductResearch, ResearchComplete, think_tool]
     
-    # Configure model with tools, retry logic, and model settings
+    # Configure model with tools, retry logic, and model settings.
+    # Plan v2 fix: tool_choice="any" forces the MiniMax-M3 model to actually
+    # emit a tool_call instead of pure prose. Without this, MiniMax-M3 often
+    # skips the tool layer and answers directly, which makes supervisor_tools
+    # short-circuit to END via the no_tool_calls branch — leaving the
+    # researcher subgraph never invoked and the EU pool empty.
     research_model = (
         configurable_model
-        .bind_tools(lead_researcher_tools)
+        .bind_tools(lead_researcher_tools, tool_choice="any")
         .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
         .with_config(research_model_config)
     )
-    
+
     # Step 2: Generate supervisor response based on current context
     supervisor_messages = state.get("supervisor_messages", [])
     response = await research_model.ainvoke(supervisor_messages)
