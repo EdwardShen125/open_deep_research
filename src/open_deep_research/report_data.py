@@ -199,6 +199,11 @@ class UrlComplianceIssue:
     severity: str           # 'high' / 'medium'
     where: str              # 'prose' / 'table' / 'source_url'
     detail: str
+    # Number of distinct sites in the RDO where this raw_url appeared.
+    # Dedup key is (section_heading, raw_url); if the writer reuses the
+    # same EU across N rows, we emit ONE issue with occurrences=N
+    # instead of N identical issues.
+    occurrences: int = 1
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -216,36 +221,62 @@ def enforce_page_level(
     domain-only URL to a page-level URL (via Crawl4AI, for example).
     If the resolver returns a page-level URL, the substitution happens.
     Otherwise the URL is replaced by the placeholder.
+
+    Dedup: identical (section, raw_url) hits collapse into one issue
+    with an `occurrences` counter. The in-place replacement still
+    visits every row so each row's source_url is rewritten exactly
+    once (regardless of how many issues we emit).
     """
-    issues: list[UrlComplianceIssue] = []
+    # Phase 1 — discover all audit candidates keyed by (section, raw_url)
+    # so the same URL appearing in N rows of one section yields one issue.
+    pending: dict[tuple[str, str], UrlComplianceIssue] = {}
     for sec in rdo.sections:
         # ----- DataRow.source_url -----
         for r in sec.rows:
             cls = classify_page_level(r.source_url)
             if cls is PageLevel.DOMAIN_ONLY and r.source_url:
-                issues.append(_audit(
-                    r.source_url, sec.heading, 'source_url', 'high',
-                    resolver, placeholder,
-                ))
+                key = (sec.heading, r.source_url)
+                if key not in pending:
+                    pending[key] = _audit(
+                        r.source_url, sec.heading, "source_url", "high",
+                        resolver, placeholder,
+                    )
+                else:
+                    pending[key].occurrences += 1
         # ----- prose_lead / prose_footer (text scan) -----
         for field_name in ("prose_lead", "prose_footer"):
             blob = getattr(sec, field_name) or ""
             for url in re.findall(r"https?://\S+", blob):
                 if classify_page_level(url) is PageLevel.DOMAIN_ONLY:
-                    issues.append(_audit(
-                        url, sec.heading, 'prose', 'medium',
+                    # prose positions are distinct audit sites even if
+                    # they happen to share the same URL — keep them
+                    # separate keys so the writer sees both.
+                    key = (sec.heading, f"prose:{url}")
+                    pending[key] = _audit(
+                        url, sec.heading, "prose", "medium",
                         resolver, placeholder,
-                    ))
-    # ----- mutate the rdo (in-place) to apply replacements -----
-    for issue in issues:
-        for sec in rdo.sections:
-            for r in sec.rows:
-                if r.source_url == issue.raw_url:
-                    r.source_url = issue.new_url_or_label
-            for field_name in ("prose_lead", "prose_footer"):
-                blob = getattr(sec, field_name) or ""
-                if issue.raw_url in blob:
-                    setattr(sec, field_name, blob.replace(issue.raw_url, issue.new_url_or_label))
+                    )
+
+    issues = list(pending.values())
+
+    # Phase 2 — mutate the rdo in-place. We walk the full RDO (not the
+    # deduped issues) so every row gets the placeholder substitution,
+    # but we use each issue's new_url_or_label so behaviour matches
+    # the issue we emitted.
+    by_url = {i.raw_url: i.new_url_or_label for i in issues}
+    for sec in rdo.sections:
+        for r in sec.rows:
+            if r.source_url in by_url:
+                r.source_url = by_url[r.source_url]
+        for field_name in ("prose_lead", "prose_footer"):
+            blob = getattr(sec, field_name) or ""
+            for raw_url, replacement in by_url.items():
+                if raw_url in blob:
+                    setattr(
+                        sec, field_name,
+                        blob.replace(raw_url, replacement),
+                    )
+                    blob = getattr(sec, field_name) or ""
     return issues
 
 

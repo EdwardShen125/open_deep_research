@@ -228,9 +228,9 @@ def test_rule_4_audits_multiple_sections_simultaneously():
 
 
 def test_rule_4_flags_prose_lead_and_prose_footer_independently():
-    """Both prose_lead and prose_footer are scanned; each URL gets its own
-    issue with the right `where` field. Runtime synthesises both fields
-    depending on writer prompt structure.
+    """Both prose_lead and prose_footer are scanned; when they contain
+    DIFFERENT domain-only URLs each gets its own issue. Runtime
+    synthesises both fields depending on writer prompt structure.
 
     Note: `where` is formatted as ``"prose (section \\"<heading>\\")"``.
     """
@@ -239,33 +239,57 @@ def test_rule_4_flags_prose_lead_and_prose_footer_independently():
         "S",
         prose_lead="Read more at https://kompyte.com",
     )
-    sec.prose_footer = "Archive: https://kompyte.com"
+    sec.prose_footer = "Archive: https://crayon.co"  # different URL from lead
     rdo.add_row(sec, DataRow(
         key="r1", label="X", category="c", values={"a": 1},
-        source_url="https://kompyte.com/pricing",  # page-level
+        source_url="https://klue.com/pricing",  # page-level
     ))
     issues = enforce_page_level(rdo)
-    assert len(issues) == 2, f"expected 2 prose hits, got {len(issues)}: {[i.where for i in issues]}"
+    assert len(issues) == 2, (
+        f"expected 2 prose hits (one per distinct URL), got {len(issues)}: "
+        f"{[i.where for i in issues]}"
+    )
     assert all(i.where.startswith("prose") for i in issues), (
         f"both issues should be in prose fields, got: {[i.where for i in issues]}"
     )
-    assert all("kompyte.com" in i.raw_url for i in issues)
-    print(f"  ✓ rule_4 flags both prose_lead and prose_footer separately")
+    raws = sorted(i.raw_url for i in issues)
+    assert "https://kompyte.com" in raws
+    assert "https://crayon.co" in raws
+    # Both prose fields are rewritten with the placeholder
+    assert "[UNVERIFIED_DOMAIN_ONLY]" in sec.prose_lead
+    assert "[UNVERIFIED_DOMAIN_ONLY]" in sec.prose_footer
+    print(f"  ✓ rule_4 flags distinct domain-only URLs in prose_lead + prose_footer")
 
 
-def test_rule_4_emits_per_row_issue_for_repeated_raw_url():
-    """Known runtime quirk: if the same domain-only URL appears in N rows
-    of the same section (writer reuses an EU for multiple claims),
-    `enforce_page_level` currently emits N issues — one per row — instead
-    of deduplicating to a single (section, raw_url) issue.
-
-    This is a deliberate gap: dedup would require changing the
-    UrlComplianceIssue schema (e.g. carry an `occurrences` counter), and
-    runtime callers today either log every issue or wrap them in
-    `{by_severity, by_url}` — both paths tolerate N identical entries.
-
-    TODO(plan-v2-7): dedup `enforce_page_level` output to (section, raw_url)
-    once the consumer side signals it would rather see aggregated counts.
+def test_rule_4_dedupes_same_url_across_prose_lead_and_footer():
+    """When the SAME domain-only URL appears in both prose_lead and
+    prose_footer (rare but possible if writer repeats a citation),
+    dedup collapses to one issue. The placeholder still replaces both
+    occurrences in the prose text.
+    """
+    rdo = ReportDataObject(title="T")
+    sec = rdo.add_section(
+        "S",
+        prose_lead="See https://kompyte.com for context",
+    )
+    sec.prose_footer = "Reiterating https://kompyte.com here"
+    issues = enforce_page_level(rdo)
+    # Both occurrences dedup to a single issue, but `by_url` replacement
+    # still hits the second occurrence in the footer (we re-read the
+    # blob after each replacement).
+    assert len(issues) == 1, (
+        f"expected 1 deduped issue, got {len(issues)}: {[i.raw_url for i in issues]}"
+    )
+    assert issues[0].raw_url == "https://kompyte.com"
+    # Both prose fields should now contain the placeholder
+    assert "[UNVERIFIED_DOMAIN_ONLY]" in sec.prose_lead
+    assert "[UNVERIFIED_DOMAIN_ONLY]" in sec.prose_footer
+    print(f"  ✓ rule_4 dedupes same URL across prose_lead+footer (1 issue, both replaced)")
+def test_rule_4_dedupes_repeated_raw_url_with_occurrences_counter():
+    """Same domain-only URL appearing in N rows of one section collapses
+    into ONE issue with `occurrences == N`. The in-place replacement
+    still visits every row so all 3 rows end up with the placeholder.
+    This closes TODO plan-v2-7.
     """
     rdo = ReportDataObject(title="T")
     sec = rdo.add_section("Duplicated")
@@ -275,18 +299,46 @@ def test_rule_4_emits_per_row_issue_for_repeated_raw_url():
             source_url="https://crayon.co",  # domain-only, repeated
         ))
     issues = enforce_page_level(rdo)
-    # Current behaviour: one issue per row, all flagged identically.
-    assert len(issues) == 3, (
-        f"expected 3 per-row issues (current behaviour), got {len(issues)}: "
+    # ONE issue per (section, raw_url), with occurrences counting repeats.
+    assert len(issues) == 1, (
+        f"expected 1 deduped issue, got {len(issues)}: "
         f"{[i.raw_url for i in issues]}"
     )
-    assert all(i.raw_url == "https://crayon.co" for i in issues)
-    # All 3 rows still get the placeholder replacement.
+    assert issues[0].occurrences == 3, (
+        f"expected occurrences=3 (3 rows reused the URL), got {issues[0].occurrences}"
+    )
+    assert issues[0].raw_url == "https://crayon.co"
+    # All 3 rows still point at the placeholder — replacement is per-row.
     new_urls = [r.source_url for r in sec.rows]
     assert all(u == "[UNVERIFIED_DOMAIN_ONLY]" for u in new_urls), (
         f"all rows should be replaced, got: {new_urls}"
     )
-    print(f"  ⚠ rule_4 emits per-row issue for repeated URL (3 issues, no dedup) — TODO plan-v2-7")
+    print(f"  ✓ rule_4 dedupes repeated URL → 1 issue with occurrences={issues[0].occurrences}, "
+          f"{len(sec.rows)} rows replaced")
+
+
+def test_rule_4_dedup_respects_section_boundary():
+    """The same domain-only URL in two DIFFERENT sections is two distinct
+    issues (because the writer rendered different content referencing it).
+    """
+    rdo = ReportDataObject(title="T")
+    sec_a = rdo.add_section("Section A")
+    sec_b = rdo.add_section("Section B")
+    for sec in (sec_a, sec_b):
+        rdo.add_row(sec, DataRow(
+            key=f"r-{sec.heading}", label="X", category="claim", values={"a": 1},
+            source_url="https://crayon.co",  # same URL, different sections
+        ))
+    issues = enforce_page_level(rdo)
+    assert len(issues) == 2, (
+        f"expected 2 issues (one per section), got {len(issues)}: "
+        f"{[(i.raw_url, i.where) for i in issues]}"
+    )
+    assert all(i.occurrences == 1 for i in issues), "each section's issue should have occurrences=1"
+    # Both sections' rows replaced
+    assert sec_a.rows[0].source_url == "[UNVERIFIED_DOMAIN_ONLY]"
+    assert sec_b.rows[0].source_url == "[UNVERIFIED_DOMAIN_ONLY]"
+    print(f"  ✓ rule_4 dedup respects section boundary (2 issues, 1 per section)")
 
 
 def test_rule_4_handles_empty_rdo_and_empty_section_gracefully():
@@ -330,8 +382,12 @@ def main():
          test_rule_4_audits_multiple_sections_simultaneously),
         ("rule_4_flags_prose_lead_and_prose_footer_independently",
          test_rule_4_flags_prose_lead_and_prose_footer_independently),
+        ("rule_4_dedupes_same_url_across_prose_lead_and_footer",
+         test_rule_4_dedupes_same_url_across_prose_lead_and_footer),
         ("rule_4_emits_per_row_issue_for_repeated_raw_url",
-         test_rule_4_emits_per_row_issue_for_repeated_raw_url),
+         test_rule_4_dedupes_repeated_raw_url_with_occurrences_counter),
+        ("rule_4_dedup_respects_section_boundary",
+         test_rule_4_dedup_respects_section_boundary),
         ("rule_4_handles_empty_rdo_and_empty_section_gracefully",
          test_rule_4_handles_empty_rdo_and_empty_section_gracefully),
     ]
