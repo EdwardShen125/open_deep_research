@@ -54,6 +54,13 @@ from open_deep_research.evidence.observability import (
     stage_trace,
 )
 from open_deep_research.evidence.pipeline import build_claims_from_eus
+from open_deep_research.evidence.report import (
+    ClaimStats,
+    Failure,
+    ReportResult,
+    ReportSection,
+    is_report_success,
+)
 from open_deep_research.evidence.schema import (
     ClaimV2,
     ClaimType,
@@ -88,11 +95,14 @@ __all__ = [
     "EntailmentResult",
     "EuDAO",
     "EvidenceUnitV2",
+    "Failure",
     "GateStats",
     "Grade",
     "MERGE_COSINE",
     "NUMERIC_TOL",
     "PRIMARY_DOMAINS",
+    "ReportResult",
+    "ReportSection",
     "ResearchJob",
     "RunCheckpointDAO",
     "SECONDARY_DOMAINS",
@@ -115,6 +125,7 @@ __all__ = [
     "has_numeric_drift",
     "host_of",
     "independent_source_count",
+    "is_report_success",
     "is_run_complete",
     "list_completed_stages",
     "list_failed_stages",
@@ -135,4 +146,4 @@ __all__ = [
     "verify_entailment_batch",
     "verify_entailment_batch_sync",
     "verify_span",
-]
+]  # noqa: E501

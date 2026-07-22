@@ -1057,10 +1057,22 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
       5. Runs `verifier.verify()` (Phase 3a rules 1/2/3/C) on the report.
       6. Renders to markdown and writes `final_report`.
 
+    Phase 7 (= Runbook v1 阶段 5.2) integration:
+      - 失败信号硬化: writer fallback / token-limit / 网络错误 不再伪装成成功报告。
+      - state 新增字段 `report_result: dict` (ReportResult.json_dumpable),
+        携带 ok=True/False + status + failures,调用方可以显式判断。
+      - 保留 `final_report: str` 向后兼容,但非空 ≠ 调研成功。
+
     Failure modes are logged but the function still produces a report —
     Plan v2 evidence data is preserved in state even if the writer LLM
     misbehaves (parser warnings + verifier issues are surfaced).
     """
+
+    # Phase 7 提前 import 避免 hot path 重复 import
+    from open_deep_research.evidence.report import (
+        Failure as _Failure,
+        ReportResult as _ReportResult,
+    )
 
     # Step 1: Extract research findings and prepare state cleanup.
     cleared_state = {"notes": {"type": "override", "value": []}}
@@ -1087,6 +1099,38 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     cited_report_dict = None
     verification_dict = None
     url_issues: list = []
+
+    # Phase 7: failures 累积, 在 return 时统一组装 ReportResult
+    _phase7_failures: list[_Failure] = []
+    _phase7_warnings: list[str] = []
+
+
+    def _build_update(
+        final_report_md: str,
+        *,
+        status: str = "ok",
+        extra_failures: Optional[list[_Failure]] = None,
+        extra_warnings: Optional[list[str]] = None,
+    ) -> dict:
+        """构造 state update dict。
+
+        - final_report: str (向后兼容)
+        - report_result: dict (ReportResult.json_dumpable,供调用方查 ok/status/failures)
+        """
+        rr = _ReportResult.from_markdown_and_status(
+            final_report_md,
+            status=status,
+            failures=_phase7_failures + (extra_failures or []),
+            warnings=_phase7_warnings + (extra_warnings or []),
+            run_id=str(state.get("research_id") or "") or None,
+            research_brief=state.get("research_brief"),
+        )
+        return {
+            "final_report": final_report_md,
+            "report_result": rr.model_dump(mode="json"),
+            "messages": [final_report_msg],
+            **cleared_state,
+        }
 
     while current_retry <= max_retries:
         try:
@@ -1189,11 +1233,11 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                     f"Inspect state['verification'] for details. -->\n"
                 )
 
-            update = {
-                "final_report": final_report_md,
-                "messages": [final_report_msg],
-                **cleared_state,
-            }
+            update = _build_update(
+                final_report_md,
+                status="ok" if (verification_dict is None or verification_dict.get("by_severity", {}).get("critical", 0) == 0) else "partial",
+                extra_warnings=([f"verifier: {verification_dict['by_severity'].get('critical', 0)} critical issue(s) flagged. Inspect state['verification'] for details."] if verification_dict and verification_dict.get("by_severity", {}).get("critical", 0) > 0 else None),
+            )
             if cited_report_dict is not None:
                 update["cited_report"] = cited_report_dict
             if verification_dict is not None:
@@ -1208,14 +1252,16 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 if current_retry == 1:
                     model_token_limit = get_model_token_limit(configurable.final_report_model)
                     if not model_token_limit:
-                        return {
-                            "final_report": f"Error generating final report: Token limit exceeded, however, we could not determine the model's maximum context length. Please update the model map in deep_researcher/utils.py with this information. {e}",
-                            "messages": [AIMessage(content="Report generation failed due to token limits")],
-                            **cleared_state,
-                        }
-                    findings_token_limit = model_token_limit * 4
-                else:
-                    findings_token_limit = int(findings_token_limit * 0.9)
+                        return _build_update(
+                            f"Error generating final report: Token limit exceeded, however, we could not determine the model's maximum context length. Please update the model map in deep_researcher/utils.py with this information. {e}",
+                            status="failed",
+                            extra_failures=[_Failure(
+                                stage="write",
+                                error_type=type(e).__name__,
+                                error_message=f"Token limit exceeded and model map missing for {configurable.final_report_model}: {e}"[:400],
+                            )],
+                        )
+                findings_token_limit = int(model_token_limit * 4) if current_retry == 1 else int((findings_token_limit or 0) * 0.9 or 1)
                 findings = findings[:findings_token_limit] if findings_token_limit else findings
                 continue
             # Handle transient network/timeout errors with exponential
@@ -1233,11 +1279,17 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                     # research data even when the writer LLM is down.
                     fallback_md = _render_eu_digest(eu_pool, configurable.final_report_model)
                     err_summary = f"Error generating final report after {max_retries} retries: [{_tb_err}] {_msg}"
-                    return {
-                        "final_report": (fallback_md + "\n\n---\n\n" + err_summary) if fallback_md else err_summary,
-                        "messages": [AIMessage(content="Report generation failed after retries; rendered EU digest fallback")],
-                        **cleared_state,
-                    }
+                    body = (fallback_md + "\n\n---\n\n" + err_summary) if fallback_md else err_summary
+                    return _build_update(
+                        body,
+                        status="fallback_used",
+                        extra_failures=[_Failure(
+                            stage="write",
+                            error_type=_tb_err,
+                            error_message=_msg,
+                        )],
+                        extra_warnings=["writer LLM exhausted retries; rendered EU digest fallback to preserve research data"],
+                    )
                 import asyncio as _asyncio
                 _backoff = min(2 ** current_retry, 16)
                 print(f"[writer] transient error ({type(e).__name__}: {str(e)[:120]}); "
@@ -1248,17 +1300,25 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 # Log full traceback so we can diagnose future failures
                 import traceback as _tb
                 _tb.print_exc()
-                return {
-                    "final_report": f"Error generating final report: {e}",
-                    "messages": [AIMessage(content="Report generation failed due to an error")],
-                    **cleared_state,
-                }
+                return _build_update(
+                    f"Error generating final report: {e}",
+                    status="failed",
+                    extra_failures=[_Failure(
+                        stage="write",
+                        error_type=type(e).__name__,
+                        error_message=str(e)[:400] if str(e) else "(empty error msg)",
+                    )],
+                )
 
-    return {
-        "final_report": "Error generating final report: Maximum retries exceeded",
-        "messages": [AIMessage(content="Report generation failed after maximum retries")],
-        **cleared_state,
-    }
+    return _build_update(
+        "Error generating final report: Maximum retries exceeded",
+        status="failed",
+        extra_failures=[_Failure(
+            stage="write",
+            error_type="MaxRetriesExceeded",
+            error_message=f"writer LLM exhausted {max_retries} retries without successful output",
+        )],
+    )
 
 
 # =============================================================================

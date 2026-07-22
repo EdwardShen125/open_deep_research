@@ -95,10 +95,15 @@ class AgentState(MessagesState):
     # Phase 3: raw_notes 已删 (decision D2-B)
     notes: Annotated[list[str], override_reducer] = []
     final_report: str
+    # Phase 7 (= Runbook v1 阶段 5.2): 结构化结果
+    # - ok: 硬信号 (True / False), 调用方只看这个字段
+    # - status: 详细分类 (ok / partial / fallback_used / failed)
+    # - failures: 失败列表供诊断
+    report_result: Optional[dict] = None
     evidence_units: Annotated[list, override_reducer] = []
     cited_report: Optional[dict] = None
     verification: Optional[dict] = None
-    url_compliance: Annotated[list, override_reducer] = []
+    url_compliance: Annotated[list, override_reducer] = []  # noqa: E501
     # Phase 3 新增:state 瘦身后的引用层
     eu_counts: Annotated[dict[str, int], override_reducer] = {}
     claim_counts: Annotated[dict[str, int], override_reducer] = {}
