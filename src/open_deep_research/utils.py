@@ -115,14 +115,17 @@ async def tavily_search(
     summaries = await asyncio.gather(*summarization_tasks)
     
     # Step 6: Combine results with their summaries
+    # Phase 4 (= Runbook v1 阶段 2.5): summarize_webpage 现在返回 dict 含 summary_method。
+    # 取 'summary' 字段作为 content(向后兼容)。
     summarized_results = {
         url: {
-            'title': result['title'], 
-            'content': result['content'] if summary is None else summary
+            'title': result['title'],
+            'content': result['content'] if summary is None
+                       else (summary.get('summary', '') if isinstance(summary, dict) else str(summary))
         }
         for url, result, summary in zip(
-            unique_results.keys(), 
-            unique_results.values(), 
+            unique_results.keys(),
+            unique_results.values(),
             summaries
         )
     }
@@ -177,45 +180,83 @@ async def tavily_search_async(
     search_results = await asyncio.gather(*search_tasks)
     return search_results
 
-async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
-    """Summarize webpage content using AI model with timeout protection.
-    
-    Args:
-        model: The chat model configured for summarization
-        webpage_content: Raw webpage content to be summarized
-        
-    Returns:
-        Formatted summary with key excerpts, or original content if summarization fails
+async def summarize_webpage(
+    model: BaseChatModel,
+    webpage_content: str,
+    *,
+    title: str = "",
+    timeout: float = 180.0,
+    truncate_chars: int = 3000,
+    min_chars_to_summarize: int = 200,
+) -> dict[str, Any]:
+    """Phase 4 (= Runbook v1 阶段 2.5) 改造:summarize_webpage 降级保留。
+
+    改造依据: notes/evidence-pipeline-runbook-v1.md 阶段 2.5
+    - 超时从 60s 放宽到 180s,失败重试 1 次
+    - 仍失败 → 取正文前 `truncate_chars` 字 + 标题,
+      返回 dict 含 summary_method="truncate",继续进抽取
+    - 不做低质页跳过(会牺牲覆盖率),只做 < `min_chars_to_summarize` 字跳过
+
+    返回 dict 而非 str:便于下游看到 summary_method 决策(LLM vs truncate)。
     """
-    try:
-        # Create prompt with current date context
-        prompt_content = summarize_webpage_prompt.format(
-            webpage_content=webpage_content, 
-            date=get_today_str()
-        )
-        
-        # Execute summarization with timeout to prevent hanging
-        summary = await asyncio.wait_for(
-            model.ainvoke([HumanMessage(content=prompt_content)]),
-            timeout=60.0  # 60 second timeout for summarization
-        )
-        
-        # Format the summary with structured sections
-        formatted_summary = (
-            f"<summary>\n{summary.summary}\n</summary>\n\n"
-            f"<key_excerpts>\n{summary.key_excerpts}\n</key_excerpts>"
-        )
-        
-        return formatted_summary
-        
-    except asyncio.TimeoutError:
-        # Timeout during summarization - return original content
-        logging.warning("Summarization timed out after 60 seconds, returning original content")
-        return webpage_content
-    except Exception as e:
-        # Other errors during summarization - log and return original content
-        logging.warning(f"Summarization failed with error: {str(e)}, returning original content")
-        return webpage_content
+    if not webpage_content or len(webpage_content) < min_chars_to_summarize:
+        return {
+            "summary": "",
+            "key_excerpts": "",
+            "summary_method": "skipped_too_short",
+            "summary_chars": len(webpage_content or ""),
+            "title": title,
+        }
+
+    last_err: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            prompt_content = summarize_webpage_prompt.format(
+                webpage_content=webpage_content,
+                date=get_today_str(),
+            )
+            summary = await asyncio.wait_for(
+                model.ainvoke([HumanMessage(content=prompt_content)]),
+                timeout=timeout,
+            )
+            formatted = (
+                f"<summary>\n{summary.summary}\n</summary>\n\n"
+                f"<key_excerpts>\n{summary.key_excerpts}\n</key_excerpts>"
+            )
+            return {
+                "summary": formatted,
+                "key_excerpts": summary.key_excerpts,
+                "summary_method": "llm",
+                "summary_chars": len(formatted),
+                "title": title,
+            }
+        except asyncio.TimeoutError as e:
+            last_err = e
+            logging.warning(
+                "summarize_webpage: attempt %d timed out after %.0fs",
+                attempt, timeout,
+            )
+        except Exception as e:
+            last_err = e
+            logging.warning(
+                "summarize_webpage: attempt %d failed: %s", attempt, e,
+            )
+
+    # 两次都失败 → 降级保留(取前 N 字符 + 标题)
+    logging.warning(
+        "summarize_webpage: falling back to truncate after 2 failed attempts: %s",
+        last_err,
+    )
+    truncated = webpage_content[:truncate_chars]
+    header = f"<title>{title}</title>\n\n" if title else ""
+    fallback_text = f"{header}<summary>\n{truncated}\n</summary>"
+    return {
+        "summary": fallback_text,
+        "key_excerpts": "",
+        "summary_method": "truncate",
+        "summary_chars": len(fallback_text),
+        "title": title,
+    }
 
 ##########################
 # Reflection Tool Utils

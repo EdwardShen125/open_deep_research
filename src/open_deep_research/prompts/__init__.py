@@ -61,6 +61,12 @@ REGISTRY: dict[str, PromptSpec] = {
         attribute="summarize_webpage_prompt",
         version="webpage_summarizer_v1",
     ),
+    "extractor": PromptSpec(
+        role="extractor",
+        module="open_deep_research.prompts.extractor_v1",
+        attribute="EXTRACT_PROMPT",
+        version="extractor_v1",
+    ),
 }
 
 
@@ -87,6 +93,7 @@ _LEGACY_NAMES = {
     "compress_research_simple_human_message": "compressor",
     "final_report_generation_prompt": "writer",
     "summarize_webpage_prompt": "webpage_summarizer",
+    "EXTRACT_PROMPT": "extractor",
 }
 
 
