@@ -11,6 +11,7 @@ PG 集成测试 (`EuDAO.upsert_many` + `EuDAO.list_by_run`) 在需要真 PG
 """
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -296,3 +297,77 @@ class TestEuDaoPostgresIntegration:
 
     def test_run_checkpoint_upsert_and_get(self):
         raise NotImplementedError
+
+
+# =============================================================================
+# ClaimDAO 集成回归测试 — 真 PG 才跑
+# =============================================================================
+
+@pytest.mark.skipif(
+    not os.environ.get("INTEGRATION_TESTS"),
+    reason="Set INTEGRATION_TESTS=1 to run; requires live PG",
+)
+class TestClaimDaoPostgresIntegration:
+    """ClaimDAO 真 PG roundtrip — 防 list[dict] → jsonb 静默失败。"""
+
+    def _make_claim(self, run_id, conflicting_values=None):
+        from open_deep_research.evidence.schema import ClaimV2
+        return ClaimV2(
+            claim_id=uuid.uuid4(),
+            run_id=run_id,
+            dimension_id="test_dim",
+            canonical_claim="test claim with conflicts",
+            claim_type="numeric",
+            entities=["x"],
+            eu_count=2,
+            independent_source_count=2,
+            primary_source_count=1,
+            grade="C" if conflicting_values else "A",
+            grade_reason="integration test",
+            has_conflict=bool(conflicting_values),
+            conflicting_values=conflicting_values or [],
+        )
+
+    def test_conflicting_values_jsonb_roundtrip(self):
+        """bug 模式:list[dict] 直接走 %()s::jsonb → psycopg3 不适配 → 炸。"""
+        from open_deep_research.evidence.eu_dao import ClaimDAO
+
+        run_id = uuid.uuid4()
+        conflict_payload = [
+            {"source": "src-a", "value": "300"},
+            {"source": "src-b", "value": "290"},
+        ]
+        claim = self._make_claim(run_id, conflicting_values=conflict_payload)
+        try:
+            with ClaimDAO() as dao:
+                dao.upsert_many([claim])
+            with ClaimDAO() as dao:
+                claims = dao.list_by_run(run_id)
+            assert len(claims) == 1
+            assert claims[0].conflicting_values == conflict_payload
+            assert claims[0].has_conflict is True
+        finally:
+            with ClaimDAO() as dao:
+                cur = dao._cur()
+                cur.execute("DELETE FROM evidence.claim WHERE run_id=%s", (run_id,))
+                dao._commit()
+
+    def test_empty_conflicting_values_roundtrip(self):
+        """边界:conflicting_values=[] (无冲突) 也能落 jsonb。"""
+        from open_deep_research.evidence.eu_dao import ClaimDAO
+
+        run_id = uuid.uuid4()
+        claim = self._make_claim(run_id, conflicting_values=[])
+        try:
+            with ClaimDAO() as dao:
+                dao.upsert_many([claim])
+            with ClaimDAO() as dao:
+                claims = dao.list_by_run(run_id)
+            assert len(claims) == 1
+            assert claims[0].conflicting_values == []
+            assert claims[0].has_conflict is False
+        finally:
+            with ClaimDAO() as dao:
+                cur = dao._cur()
+                cur.execute("DELETE FROM evidence.claim WHERE run_id=%s", (run_id,))
+                dao._commit()
