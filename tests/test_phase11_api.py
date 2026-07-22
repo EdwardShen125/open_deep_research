@@ -222,6 +222,57 @@ class TestIntegrationPg:
         # 如果 checkpoint 写失败,stages 列表可能空 — 不强求(stub 友好)
 
 
+@pytest.mark.skipif(
+    not os.environ.get("INTEGRATION_TESTS"),
+    reason="Set INTEGRATION_TESTS=1 to run; requires live PG",
+)
+class TestCheckpointDictPayload:
+    """回归测试:RunCheckpointDAO.upsert 传 dict payload 必须能落 jsonb 列。
+
+    起因:phase 11 验收时 BackgroundTask 静默失败 — _ckpt 的 try/except
+    把异常吞了,只在 logger.warning 暴露。TestClient 测试绕过了真 DAO,
+    所以 Phase 11 单元测试 16 个全过但生产链路其实没真写过 PG。
+    """
+
+    def test_dict_payload_roundtrips(self):
+        from open_deep_research.evidence.eu_dao import RunCheckpointDAO
+
+        rid = uuid.uuid4()
+        stage = "test_dict_payload_roundtrips"
+        payload = {"query": "fix verify", "mode": "evidence-only", "n": 42}
+        try:
+            with RunCheckpointDAO() as rdao:
+                rdao.upsert(run_id=rid, stage=stage, status="done", payload=payload)
+            with RunCheckpointDAO() as rdao:
+                row = rdao.get(rid, stage)
+            assert row is not None
+            assert row["payload"] == payload
+        finally:
+            with RunCheckpointDAO() as rdao:
+                cur = rdao._cur()
+                cur.execute("DELETE FROM evidence.run_checkpoint WHERE stage=%s", (stage,))
+                rdao._commit()
+
+    def test_empty_payload_roundtrips(self):
+        """边界: payload={} (默认情况) 也能落 jsonb。"""
+        from open_deep_research.evidence.eu_dao import RunCheckpointDAO
+
+        rid = uuid.uuid4()
+        stage = "test_empty_payload_roundtrips"
+        try:
+            with RunCheckpointDAO() as rdao:
+                rdao.upsert(run_id=rid, stage=stage, status="done")
+            with RunCheckpointDAO() as rdao:
+                row = rdao.get(rid, stage)
+            assert row is not None
+            assert row["payload"] == {}
+        finally:
+            with RunCheckpointDAO() as rdao:
+                cur = rdao._cur()
+                cur.execute("DELETE FROM evidence.run_checkpoint WHERE stage=%s", (stage,))
+                rdao._commit()
+
+
 __all__ = [
     "TestEndpoints",
     "TestStartRun",
@@ -229,5 +280,6 @@ __all__ = [
     "TestGetReport",
     "TestBackgroundTaskEvidenceOnly",
     "TestRunRegistry",
+    "TestCheckpointDictPayload",
     "TestIntegrationPg",
 ]
