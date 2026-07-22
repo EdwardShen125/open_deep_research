@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 
@@ -69,14 +69,17 @@ def _hash_pseudo_vector(text: str, dim: int = EMBED_DIM) -> np.ndarray:
 class _BGEModelSingleton:
     """Lazy-load BGE-M3 model on first call.
 
-    Model file 在 ~/.cache/huggingface/hub/;如果下载失败(_load raises),
+    Model file 在 ~/.cache/huggingface/hub/;如果下载失败 / 超时,
     调用方自动 fallback 到 hash_pseudo_vector。
+
+    关键: load 必须在子线程里跑 + 自身 timeout,防止网络挂起阻塞 caller。
     """
 
     _model: Optional[object] = None
     _load_attempted: bool = False
     _load_failed: bool = False
     _last_error: Optional[str] = None
+    _load_timeout_seconds: int = 30
 
     @classmethod
     def get(cls):
@@ -86,15 +89,36 @@ class _BGEModelSingleton:
             return None  # 已失败过,直接返回 None 触发 fallback
         cls._load_attempted = True
         try:
-            # 强制 CPU,避免无 GPU 环境崩
             os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
             from sentence_transformers import SentenceTransformer  # type: ignore
 
-            cls._model = SentenceTransformer(
-                "BAAI/bge-m3",
-                device="cpu",
-                trust_remote_code=False,
-            )
+            # 在子线程里 load + 加 timeout,防止网络挂起阻塞 caller
+            import threading
+
+            result: dict[str, Any] = {}
+
+            def _load() -> None:
+                try:
+                    result["model"] = SentenceTransformer(
+                        "BAAI/bge-m3",
+                        device="cpu",
+                        trust_remote_code=False,
+                    )
+                except Exception as e:
+                    result["error"] = e
+
+            t = threading.Thread(target=_load, daemon=True)
+            t.start()
+            t.join(timeout=cls._load_timeout_seconds)
+            if t.is_alive():
+                # 子线程超时 → 主线程继续,fallback
+                cls._load_failed = True
+                cls._last_error = f"load timeout after {cls._load_timeout_seconds}s (likely network)"
+                logger.warning("BGE-M3 %s", cls._last_error)
+                return None
+            if "error" in result:
+                raise result["error"]
+            cls._model = result["model"]
             logger.info("BGE-M3 loaded: dim=%d", cls._model.get_sentence_embedding_dimension())
             return cls._model
         except Exception as e:
