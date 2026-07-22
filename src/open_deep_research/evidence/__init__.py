@@ -44,6 +44,17 @@ from open_deep_research.evidence.checkpoint import (
     mark_stage_running,
     reset_run,
 )
+from open_deep_research.evidence.dag import (
+    DAG,
+    DAGNode,
+    DAGValidationError,
+    NodeQuota,
+    batch_dag_for_dimensions,
+    dag_to_stages,
+    default_pipeline_dag,
+    topo_sort,
+    validate_dag,
+)
 from open_deep_research.evidence.grade_retro import (
     DEFAULT_D_THRESHOLD,
     DEFAULT_MAX_RETRIES,
@@ -62,6 +73,7 @@ from open_deep_research.evidence.observability import (
     observability_status,
     stage_trace,
 )
+from open_deep_research.evidence.per_dim_retro import run_with_per_dim_retro
 from open_deep_research.evidence.pipeline import build_claims_from_eus
 from open_deep_research.evidence.report import (
     ClaimStats,
@@ -102,6 +114,9 @@ __all__ = [
     "ENTAILMENT_PROMPT",
     "EntailmentBatchResult",
     "EntailmentResult",
+    "DAG",
+    "DAGNode",
+    "DAGValidationError",
     "EuDAO",
     "EvidenceUnitV2",
     "Failure",
@@ -109,11 +124,12 @@ __all__ = [
     "Grade",
     "MERGE_COSINE",
     "NUMERIC_TOL",
+    "NodeQuota",
     "PRIMARY_DOMAINS",
     "ReportResult",
     "ReportSection",
     "ResearchJob",
-    "DEFAULT_D_THRESHOLD",  # retro threshold
+    "DEFAULT_D_THRESHOLD",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_RETRY_STAGES",
     "RunCheckpointDAO",
@@ -126,9 +142,12 @@ __all__ = [
     "_normalize",
     "_numbers",
     "_render_entailment_items",
+    "batch_dag_for_dimensions",
     "build_claim_drafts",
     "build_claims_from_eus",
     "classify_source_tier",
+    "dag_to_stages",
+    "default_pipeline_dag",
     "detect_grade_d_pct",
     "extract_from_content_with_llm",
     "extract_from_search_results_with_llm",
@@ -154,11 +173,14 @@ __all__ = [
     "retro_summary",
     "run_gate1_span",
     "run_gate2_numeric_drift",
+    "run_with_per_dim_retro",
     "run_with_retro_loop",
     "same_unit",
     "should_retry",
     "stage_trace",
+    "topo_sort",
     "upgrade_source_tier",
+    "validate_dag",
     "verify_entailment_batch",
     "verify_entailment_batch_sync",
     "verify_span",

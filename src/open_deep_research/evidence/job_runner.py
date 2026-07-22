@@ -70,17 +70,20 @@ class ResearchJob:
         stages: list[tuple[str, StageFn]],
         *,
         strict: bool = False,
+        stage_names: Optional[list[str]] = None,
     ) -> None:
         """初始化。
 
         Args:
             stages: [(stage_name, async_fn), ...] 按顺序
             strict: 如果 True,stage 已 done 时抛 StageAlreadyDone;默认 False 直接跳过
+            stage_names: 可选 — 自定义 stage 名集合(用于 DAG 全限定名)。
+                None = 用 stages 的 name 推断
 
         校验:
         - stages 不能为空
         - stage_name 必须唯一
-        - stage_name 顺序应与 STAGES 一致(否则 get_resume_point 可能返回错位)
+        - stage_name 顺序应与 stages 顺序一致
         """
         if not stages:
             raise ValueError("ResearchJob 至少需要一个 stage")
@@ -89,6 +92,8 @@ class ResearchJob:
             raise ValueError(f"stage name 重复: {names}")
         self.stages = stages
         self.strict = strict
+        # 默认 stage_names = stages 的 names;DAG 用户可显式传 per-dim 列表
+        self._stage_names = stage_names if stage_names is not None else names
 
     async def run(self, run_id: str | UUID, initial_state: dict) -> dict:
         """串行跑所有未 done 的 stage。
@@ -100,8 +105,10 @@ class ResearchJob:
         ctx = {"run_id": rid, "logger": logger}
         state = dict(initial_state)
 
-        completed = list_completed_stages(rid)
-        failed = list_failed_stages(rid)
+        # 续跑时只查本 job 的 stage 名(避免 STAGES 元组与 DAG 名冲突)
+        s_names = self._stage_names
+        completed = list_completed_stages(rid, stage_names=s_names)
+        failed = list_failed_stages(rid, stage_names=s_names)
         if failed:
             logger.warning("[job %s] 失败后重启,跳过已完成 %s,失败 stage: %s",
                            rid, completed, failed)
@@ -119,9 +126,9 @@ class ResearchJob:
             # 真正的 stage 执行(包 stage_trace)
             await self._execute_stage(rid, stage_name, stage_fn, state, ctx)
 
-        # 最终验证
-        if not is_run_complete(rid):
-            resume = get_resume_point(rid)
+        # 最终验证(用本 job 的 stage 名)
+        if not is_run_complete(rid, stage_names=s_names):
+            resume = get_resume_point(rid, stage_names=s_names)
             raise RuntimeError(
                 f"[job {rid}] pipeline 跑完后仍不是 complete,resume_point={resume}"
             )

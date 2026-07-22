@@ -119,14 +119,24 @@ def get_stage_status(run_id: str | UUID, stage: str) -> Optional[str]:
         return row["status"] if row else None
 
 
-def _stages_with_status(run_id: str | UUID, status: str) -> set[str]:
+def _stages_with_status(
+    run_id: str | UUID,
+    status: str,
+    *,
+    stage_names: Optional[Iterable[str]] = None,
+) -> set[str]:
     """返回所有 status=<status> 的 stage 名集合。
+
+    stage_names: 可选 — 指定枚举哪些 stage 名。
+        None = 用全局 STAGES 元组(向后兼容)
+        Iterable = 指定列表(例如 DAG 节点名)
 
     内部辅助:避免 list_completed / list_failed 重复 SQL。
     Mock DAO 实现只需提供 .get(),不需要 list 接口。
     """
+    targets = list(stage_names) if stage_names is not None else list(STAGES)
     found = set()
-    for s in STAGES:
+    for s in targets:
         with _ctx() as dao:
             row = dao.get(run_id, s)
         if row and row.get("status") == status:
@@ -134,35 +144,74 @@ def _stages_with_status(run_id: str | UUID, status: str) -> set[str]:
     return found
 
 
-def list_completed_stages(run_id: str | UUID) -> list[str]:
-    """列出所有 status='done' 的 stage,按 STAGES 顺序返回。"""
-    done = _stages_with_status(run_id, "done")
-    return [s for s in STAGES if s in done]
+def list_completed_stages(
+    run_id: str | UUID,
+    *,
+    stage_names: Optional[Iterable[str]] = None,
+) -> list[str]:
+    """列出所有 status='done' 的 stage,按 STAGES 顺序(若不指定)或 stage_names 顺序。
+
+    Args:
+        run_id: 调研 run ID
+        stage_names: 可选 — 限制查哪些 stage(None = STAGES 元组)
+    """
+    if stage_names is None:
+        # 默认枚举全部 STAGES
+        done = _stages_with_status(run_id, "done")
+        return [s for s in STAGES if s in done]
+    # 指定了 stage_names — 按 stage_names 顺序返回
+    targets = list(stage_names)
+    done = _stages_with_status(run_id, "done", stage_names=targets)
+    return [s for s in targets if s in done]
 
 
-def list_failed_stages(run_id: str | UUID) -> list[str]:
-    """列出所有 status='failed' 的 stage,按 STAGES 顺序返回。"""
-    failed = _stages_with_status(run_id, "failed")
-    return [s for s in STAGES if s in failed]
+def list_failed_stages(
+    run_id: str | UUID,
+    *,
+    stage_names: Optional[Iterable[str]] = None,
+) -> list[str]:
+    """列出所有 status='failed' 的 stage,按 STAGES 顺序(若不指定)或 stage_names 顺序。"""
+    if stage_names is None:
+        failed = _stages_with_status(run_id, "failed")
+        return [s for s in STAGES if s in failed]
+    targets = list(stage_names)
+    failed = _stages_with_status(run_id, "failed", stage_names=targets)
+    return [s for s in targets if s in failed]
 
 
-def get_resume_point(run_id: str | UUID) -> Optional[str]:
-    """返回第一个未 'done' 的 stage (按 STAGES 顺序)。
+def get_resume_point(
+    run_id: str | UUID,
+    *,
+    stage_names: Optional[Iterable[str]] = None,
+) -> Optional[str]:
+    """返回第一个未 'done' 的 stage (按 STAGES 顺序或 stage_names 顺序)。
 
     Returns:
         - None: 全部 stage 已 done
         - 第一个 status != 'done' 的 stage 名
     """
-    done = set(list_completed_stages(run_id))
-    for s in STAGES:
+    if stage_names is None:
+        done = set(list_completed_stages(run_id))
+        targets = list(STAGES)
+    else:
+        targets = list(stage_names)
+        done = set(list_completed_stages(run_id, stage_names=targets))
+    for s in targets:
         if s not in done:
             return s
     return None
 
 
-def is_run_complete(run_id: str | UUID) -> bool:
-    """判断整个 run 的全部 stage 是否都已 done。"""
-    return get_resume_point(run_id) is None
+def is_run_complete(
+    run_id: str | UUID,
+    *,
+    stage_names: Optional[Iterable[str]] = None,
+) -> bool:
+    """判断整个 run 的全部 stage 是否都已 done。
+
+    stage_names: None = 用 STAGES 元组;Iterable = 自定义集合(DAG 节点名)
+    """
+    return get_resume_point(run_id, stage_names=stage_names) is None
 
 
 def reset_run(run_id: str | UUID, *, stages: Optional[Iterable[str]] = None) -> None:
