@@ -22,6 +22,9 @@ from uuid import UUID
 
 from open_deep_research.evidence.schema import ClaimV2, EvidenceUnitV2, Grade
 
+# psycopg3 不自动把 dict 适配成 jsonb;任何 ::jsonb 字段传 dict 必须显式 Jsonb(...) 包
+from psycopg.types.json import Jsonb
+
 
 # =============================================================================
 # Helpers
@@ -490,7 +493,13 @@ class RunCheckpointDAO:
                 payload = EXCLUDED.payload,
                 finished_at = EXCLUDED.finished_at
             """,
-            (str(run_id), stage, status, payload or {}, status),
+            (
+                str(run_id),
+                stage,
+                status,
+                Jsonb(payload or {}),  # dict → jsonb 必须显式包;psycopg3 不自动适配
+                status,
+            ),
         )
         self._commit()
 
