@@ -5,6 +5,17 @@ from open_deep_research.evidence.eu_dao import (
     RunCheckpointDAO,
     host_of,
 )
+from open_deep_research.evidence.independence import (
+    PRIMARY_DOMAINS,
+    SECONDARY_DOMAINS,
+    UGC_DOMAINS,
+    classify_source_tier,
+    grade_claim,
+    independent_source_count,
+    primary_source_count,
+    registrable_domain,
+    upgrade_source_tier,
+)
 from open_deep_research.evidence.llm_entailment import (
     DEFAULT_BATCH_SIZE,
     verify_entailment_batch,
@@ -14,6 +25,15 @@ from open_deep_research.evidence.llm_extractor import (
     extract_from_content_with_llm,
     extract_from_search_results_with_llm,
 )
+from open_deep_research.evidence.merge import (
+    MERGE_COSINE,
+    NUMERIC_TOL,
+    ClaimDraft,
+    build_claim_drafts,
+    merge_units,
+    same_unit,
+)
+from open_deep_research.evidence.pipeline import build_claims_from_eus
 from open_deep_research.evidence.schema import (
     ClaimV2,
     ClaimType,
@@ -39,6 +59,7 @@ from open_deep_research.evidence.verify import (
 
 __all__ = [
     "ClaimDAO",
+    "ClaimDraft",
     "ClaimV2",
     "ClaimType",
     "DEFAULT_BATCH_SIZE",
@@ -49,19 +70,34 @@ __all__ = [
     "EvidenceUnitV2",
     "GateStats",
     "Grade",
+    "MERGE_COSINE",
+    "NUMERIC_TOL",
+    "PRIMARY_DOMAINS",
     "RunCheckpointDAO",
+    "SECONDARY_DOMAINS",
     "SourceTier",
+    "UGC_DOMAINS",
     "Verdict",
     "_normalize",
     "_numbers",
     "_render_entailment_items",
+    "build_claim_drafts",
+    "build_claims_from_eus",
+    "classify_source_tier",
     "extract_from_content_with_llm",
     "extract_from_search_results_with_llm",
+    "grade_claim",
     "has_numeric_drift",
     "host_of",
+    "independent_source_count",
+    "merge_units",
     "parse_entailment_response",
+    "primary_source_count",
+    "registrable_domain",
     "run_gate1_span",
     "run_gate2_numeric_drift",
+    "same_unit",
+    "upgrade_source_tier",
     "verify_entailment_batch",
     "verify_entailment_batch_sync",
     "verify_span",

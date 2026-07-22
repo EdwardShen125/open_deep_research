@@ -220,7 +220,7 @@ class ClaimV2(BaseModel):
         None, ge=0.0, description="各源数值最大相对偏差",
     )
 
-    eu_count: int = Field(ge=1)
+    eu_count: int = Field(ge=0)
     independent_source_count: int = Field(ge=0)
     primary_source_count: int = Field(ge=0)
     earliest_published_at: Optional[datetime] = None
@@ -232,11 +232,9 @@ class ClaimV2(BaseModel):
     grade_reason: str
 
     @model_validator(mode="after")
-    def _grade_d_requires_no_entailed(self) -> "ClaimV2":
-        # D 级只能用于"无可用 EU",eu_count 必须为 0
-        # (虽然 Field(ge=1) 强制 ≥1,所以 D 级不可能存在;留作 Phase 3 前的 sanity check)
-        if self.grade == "D" and self.eu_count > 0:
-            raise ValueError("D 级 claim 的 eu_count 必须为 0")
+    def _grade_consistency(self) -> "ClaimV2":
+        # A/B/C 级必须有 EU;D 级可以 0(标记"该 dimension 无可用 EU",阶段 7 planner
+        # 可用作 gap 标记)
         if self.grade != "D" and self.eu_count == 0:
             raise ValueError(f"{self.grade} 级 claim 必须至少 1 个 EU")
         return self
