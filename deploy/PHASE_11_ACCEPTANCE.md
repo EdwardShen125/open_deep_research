@@ -16,7 +16,9 @@
 | 8 | 自定义 run_id / UUID 校验 / 409 重号 | ✅ | 3 个 test |
 | 9 | Background task 失败不挂 server | ✅ | exception → registry status=failed,error 记录 |
 | 10 | PG 连接检查(lifespan + healthz) | ✅ | `/healthz` 返 `{pg_ok: true/false}` |
-| 11 | 现有 474 测试零破坏 | ✅ | **490 passed, 6 skipped**(从 474 → 490, +16) |
+| 11 | BackgroundTask **真** 写 PG(非静默失败) | ✅ | `stages` 非空 + `TestCheckpointDictPayload` 集成测试真连 PG |
+| 12 | dict payload 落 `::jsonb` 不报错 | ✅ | `Jsonb(...)` 包;`test_dict_payload_roundtrips` + `test_empty_payload_roundtrips` 真 PG 通过 |
+| 13 | 现有 474 测试零破坏 | ✅ | **477 passed, 6 skipped**(从 474 → 477,+3 新集成测试默认 skip) |
 
 ## 启动方式
 
@@ -80,6 +82,18 @@ deploy/
 - **Background task 单进程**:单机跑可,生产多 worker 需换 arq/celery。当前接口形态不变
 - **没 streaming/SSE**:GET /runs/{id}/report 是 polling。后续阶段加
 - **没 OAuth / 多租户**:路线图后续
+
+## 回归教训(P0 + 阶段 11 期间发现)
+
+**bug 模式**:`RunCheckpointDAO.upsert(run_id, stage, status, payload={...})` 把 dict 直接喂给 `%s::jsonb` 占位符 → psycopg3 **不自动**把 dict 适配成 jsonb → `cannot adapt type 'dict' using placeholder '%s'`。
+
+**为什么 phase 11 验收漏过**:`_run_pipeline_background._ckpt` 的 try/except 把异常**静默吞掉**,只 `logger.warning(...)`。`TestClient` 测试绕过了真 DAO(没有真 PG)。**单元测试 16 个全过,但生产链路 BackgroundTask 写的 checkpoint 全部失败**,`/runs/{id}` 返回 `stages=[]`,端点看起来"成功"。
+
+**修复**:
+1. `RunCheckpointDAO.upsert` 参数包 `Jsonb(payload or {})`(`from psycopg.types.json import Jsonb`)
+2. 新增 `TestCheckpointDictPayload` 集成测试(默认 `INTEGRATION_TESTS=1` skip,真 PG 下真验证 dict payload 落 jsonb)
+
+**通用规则**:任何 `::jsonb` 占位符传 dict 必须 `Jsonb(...)` 包。psycopg3 不会替你做。
 
 ## 后续阶段(路线图)
 
