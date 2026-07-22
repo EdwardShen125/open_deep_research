@@ -67,7 +67,12 @@ import re
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Iterable, Optional
+from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from open_deep_research.evidence.schema import EvidenceUnitV2
 
 
 # =============================================================================
@@ -367,6 +372,85 @@ class EvidenceUnit:
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def to_v2(self, *, run_id: str) -> "EvidenceUnitV2":
+        """Convert to Phase 3 (= Runbook v1) Pydantic EvidenceUnitV2.
+
+        Phase 3 设计依据: notes/phase1-pr-design-rationale.md 决策 D1。
+        桥接 dataclass → Pydantic,让 phase1 PR 不破坏现有 18 个测试
+        (test_evidence_units.py)。
+
+        字段映射:
+            claim     → claim
+            quote     → source_span (≤200 字符的整句,直接当 span)
+            source_url→ source_url
+            source_title→ source_title
+            numbers[0]→ norm_value (取第一个数值绑定作为代表)
+            numbers[0].text → unit hint (启发式:含 USD / 美元 → "USD", etc.)
+            entities[]→ entities (扁平化 name)
+            confidence→ (丢弃,改为三道闸回填 span_verified/numeric_drift/entailment)
+            extraction_method → extractor_model
+            content_hash → content_hash (跨 run dedup 锚)
+            source_domain ← urlsplit(source_url).hostname
+            source_tier ← 默认 "tertiary" (阶段 3 才按白名单升级)
+            claim_type ← 默认 "attribute" (deterministic extractor 不区分)
+            dimension_id ← None (阶段 3 才接 planner)
+            value_as_of ← None (deterministic 不解析时间锚)
+            published_at ← None (Tavily 没给)
+            span_start / span_end ← None (阶段 2 闸 1 才有)
+            span_verified / numeric_drift / entailment_verdict ← 默认未校验
+        """
+        from open_deep_research.evidence.schema import EvidenceUnitV2, SourceTier
+
+        # claim_type 启发:有 numbers → numeric;否则 default attribute
+        if self.numbers:
+            claim_type = "numeric"
+        else:
+            claim_type = "attribute"
+
+        # norm_value + unit 从 numbers[0] 取
+        norm_value: Optional[Decimal] = None
+        unit: Optional[str] = None
+        if self.numbers:
+            n0 = self.numbers[0]
+            if n0.value_min is not None:
+                norm_value = Decimal(str(n0.value_min))
+            unit = n0.unit
+
+        # source_tier 默认 tertiary(阶段 3 白名单升级)
+        # 实际 production 抽取器应该根据 source_domain 决定,这里保守走 default
+        source_tier: SourceTier = "tertiary"
+
+        # run_id 转换:str → UUID(str)
+        from uuid import UUID as _UUID
+        rid = _UUID(run_id) if not isinstance(run_id, _UUID) else run_id
+
+        return EvidenceUnitV2(
+            run_id=rid,
+            dimension_id=None,
+            claim=self.claim,
+            claim_type=claim_type,
+            entities=[e.name for e in self.entities],
+            norm_value=norm_value,
+            unit=unit,
+            value_as_of=None,
+            source_url=self.source_url,
+            source_domain=urlsplit(self.source_url).hostname or "",
+            source_title=self.source_title,
+            published_at=None,
+            source_tier=source_tier,
+            source_span=self.quote or self.claim,  # 旧 quote 是 ≤200 字符的整句
+            span_start=None,
+            span_end=None,
+            extractor_model=self.extraction_method,
+            extracted_at=self.extracted_at,
+            span_verified=False,
+            numeric_drift=False,
+            entailment_verdict=None,
+            entailment_score=None,
+            claim_id=None,
+            content_hash=self.content_hash,
+        )
 
     # -- (de)serialize --
     def to_dict(self) -> dict[str, Any]:

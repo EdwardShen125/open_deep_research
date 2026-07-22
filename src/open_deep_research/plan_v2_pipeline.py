@@ -232,6 +232,24 @@ async def run_pipeline(
             validate_cited_report(cited, out.evidence_units)
         )
 
+        # ----- 3.5 Phase 3 (= Runbook v1 阶段 1.3): 同步落 PG -----
+        # 把确定性抽取的 EU 写 PG evidence.evidence_unit 表,作为"一等公民"。
+        # 失败则 fail-safe(pipeline 仍返回 in-memory 结果)。
+        try:
+            from open_deep_research.evidence import EuDAO
+            v2_eus = [eu.to_v2(run_id=rid) for eu in out.evidence_units]
+            if v2_eus:
+                with EuDAO() as dao:
+                    dao.upsert_many(v2_eus)
+        except Exception as pg_e:
+            import warnings
+            warnings.warn(
+                f"Phase 3 EuDAO.upsert_many failed (run_id={rid}): {pg_e}; "
+                "falling back to in-memory EU only",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
         # ----- 4. Verifier -----
         verification = verify(cited, out.evidence_units)
         out.verification = verification
