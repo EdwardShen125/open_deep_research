@@ -362,7 +362,13 @@ class ClaimDAO:
         self._conn.commit()
 
     def upsert_many(self, claims: Iterable[ClaimV2]) -> list[str]:
-        rows = [c.to_pg_row() for c in claims]
+        # 把 conflicting_values (list[dict]) 包成 Jsonb — psycopg3 不会自动适配
+        # 只有该字段需要包;其他 list 字段(entities)是 list[str] 走 ::jsonb 占位 OK
+        rows = []
+        for c in claims:
+            row = c.to_pg_row()
+            row["conflicting_values"] = Jsonb(row["conflicting_values"])
+            rows.append(row)
         if not rows:
             return []
         cur = self._cur()
