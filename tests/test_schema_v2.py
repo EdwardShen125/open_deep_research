@@ -140,11 +140,21 @@ def test_claim_basic():
     assert c.eu_count == 2
 
 
-def test_claim_d_grade_requires_zero_eu():
-    with pytest.raises(Exception):
-        _make_claim(grade="D", eu_count=1)
-    with pytest.raises(Exception):
-        _make_claim(grade="A", eu_count=0)
+def test_claim_d_grade_allows_zero_or_more_eu():
+    """D 级允许 eu_count=0(gap marker),也允许 eu_count>0(归并组均无 entailed)。"""
+    # eu_count=0 → 合法
+    c = _make_claim(grade="D", eu_count=0)
+    assert c.grade == "D"
+    # eu_count>0 → 也合法
+    c2 = _make_claim(grade="D", eu_count=2)
+    assert c2.grade == "D"
+
+
+def test_claim_nond_requires_at_least_one_eu():
+    """A/B/C 级必须有 ≥1 个 EU。"""
+    for g in ("A", "B", "C"):
+        with pytest.raises(Exception):
+            _make_claim(grade=g, eu_count=0)
 
 
 def test_claim_conflict_serialization():
