@@ -79,6 +79,81 @@ configurable_model = create_configurable_model(
     configurable_fields=("model", "max_tokens", "api_key"),
 )
 
+
+# =============================================================================
+# Phase 3 helpers (= Runbook v1 阶段 1.3)
+# =============================================================================
+
+def _resolve_run_id(config: RunnableConfig) -> Optional[str]:
+    """从 LangGraph RunnableConfig 提取 run_id(UUID 字符串)。
+
+    优先级:
+      1) configurable["thread_id"](LangGraph 线程 ID,标准位置)
+      2) configurable["run_id"](自定义)
+      3) metadata.run_id
+      4) config["run_id"] 顶层
+
+    返回 UUID 字符串;找不到返回 None。
+    """
+    try:
+        conf = config.get("configurable") or {}
+        for k in ("thread_id", "run_id"):
+            v = conf.get(k)
+            if v:
+                return str(v)
+        meta = config.get("metadata") or {}
+        v = meta.get("run_id")
+        if v:
+            return str(v)
+        v = config.get("run_id")
+        if v:
+            return str(v)
+    except Exception as e:
+        logger.debug("_resolve_run_id failed: %s", e)
+    return None
+
+
+def _persist_eus_to_pg(run_id: str, eus_concat: list) -> None:
+    """Phase 3: 把 supervisor 聚合的 EU 写 PG。失败不抛(fail-safe)。
+
+    兼容 dataclass / dict / Pydantic v2 三种 EU 形态:
+      - dataclass (LegacyEU): 调 to_v2(run_id=...)
+      - Pydantic v2 (EvidenceUnitV2): 直接 upsert
+      - dict (from researcher_tools asdict): 尝试 reconstruct
+    """
+    try:
+        from open_deep_research.evidence import EuDAO
+        from open_deep_research.evidence_units import EvidenceUnit as LegacyEU
+
+        v2_eus = []
+        for eu in eus_concat:
+            if isinstance(eu, dict):
+                # researcher_tools 的 dict 路径(asdict 输出)无法直接构造 Pydantic v2
+                # 因为 EU v2 要求 UUID run_id 而 dict 里通常只有字符串。
+                # 退化:跳过,留给阶段 4 处理(LangGraph state 序列化路径)。
+                continue
+            if hasattr(eu, "to_v2") and callable(getattr(eu, "to_v2")):
+                v2_eus.append(eu.to_v2(run_id=run_id))
+            elif isinstance(eu, LegacyEU):
+                v2_eus.append(eu.to_v2(run_id=run_id))
+        if not v2_eus:
+            return
+        with EuDAO() as dao:
+            dao.upsert_many(v2_eus)
+        logger.info(
+            "supervisor_tools: persisted %d EU to PG run_id=%s",
+            len(v2_eus), run_id,
+        )
+    except Exception as pg_e:
+        # PG 失败是 fail-safe:state 仍持有 EU,不影响 supervisor 后续步骤。
+        # 阶段 4 worker job 化后会通过 run_checkpoint 续跑补齐。
+        logger.warning(
+            "supervisor_tools: EuDAO.upsert_many failed (run_id=%s): %s; "
+            "falling back to in-memory state",
+            run_id, pg_e,
+        )
+
+
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
     
@@ -485,6 +560,25 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 )
             if eus_concat:
                 update_payload["evidence_units"] = eus_concat
+
+            # Phase 3 (= Runbook v1 阶段 1.3): state 瘦身后的引用层。
+            # 不再持有 EU 内容,只持有 dimension_id → 计数 和 dimension_ids 列表。
+            # 这样 state 序列化 < 50KB 验收才能过。
+            eu_counts_agg: dict[str, int] = {}
+            for observation in tool_results:
+                dim = observation.get("dimension_id")
+                cnt = observation.get("eu_count", 0)
+                if dim is not None and cnt:
+                    eu_counts_agg[dim] = eu_counts_agg.get(dim, 0) + int(cnt)
+            if eu_counts_agg:
+                update_payload["eu_counts"] = eu_counts_agg
+                update_payload["dimension_ids"] = sorted(eu_counts_agg.keys())
+
+            # Phase 3: 同步落 PG(若 PG 可用;失败则 fail-safe)。
+            # run_id 取 configurable.thread_id;若 config 没暴露则用 fallback。
+            pg_run_id = _resolve_run_id(config)
+            if pg_run_id and eus_concat:
+                _persist_eus_to_pg(pg_run_id, eus_concat)
                 
         except Exception as e:
             # Handle research execution errors
@@ -741,22 +835,20 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
             # Execute compression
             response = await synthesizer_model.ainvoke(messages)
             
-            # Extract raw notes from all tool and AI messages
-            raw_notes_content = "\n".join([
-                str(message.content)
-                for message in filter_messages(researcher_messages, include_types=["tool", "ai"])
-            ])
-
             # Phase 2.3 — forward EUs (collected upstream by researcher_tools)
             # so downstream supervisor / writer have structured citations,
             # not just the LLM-compressed prose.
             result = {
                 "compressed_research": str(response.content),
-                "raw_notes": [raw_notes_content],
+                # Phase 3: raw_notes 已删 (decision D2-B)。supervisor 不再持有
+                # 全量 researcher message 文本。
             }
             eus = list(state.get("evidence_units") or [])
             if eus:
                 result["evidence_units"] = eus
+            # Phase 3 新增:dimension_id + eu_count(state 瘦身后的引用层)
+            result["dimension_id"] = state.get("dimension_id")
+            result["eu_count"] = len(eus)
             return result
 
         except Exception as e:
@@ -771,18 +863,15 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
             continue
 
     # Step 4: Return error result if all attempts failed
-    raw_notes_content = "\n".join([
-        str(message.content)
-        for message in filter_messages(researcher_messages, include_types=["tool", "ai"])
-    ])
-
     result = {
         "compressed_research": "Error synthesizing research report: Maximum retries exceeded",
-        "raw_notes": [raw_notes_content],
+        # Phase 3: raw_notes 已删 (decision D2-B)。
     }
     eus = list(state.get("evidence_units") or [])
     if eus:
         result["evidence_units"] = eus
+    result["dimension_id"] = state.get("dimension_id")
+    result["eu_count"] = len(eus)
     return result
 
 # Researcher Subgraph Construction
