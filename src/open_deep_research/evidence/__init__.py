@@ -44,6 +44,15 @@ from open_deep_research.evidence.checkpoint import (
     mark_stage_running,
     reset_run,
 )
+from open_deep_research.evidence.grade_retro import (
+    DEFAULT_D_THRESHOLD,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_STAGES,
+    detect_grade_d_pct,
+    retro_summary,
+    run_with_retro_loop,
+    should_retry,
+)
 from open_deep_research.evidence.job_runner import (
     ResearchJob,
     StageAlreadyDone,
@@ -104,6 +113,9 @@ __all__ = [
     "ReportResult",
     "ReportSection",
     "ResearchJob",
+    "DEFAULT_D_THRESHOLD",  # retro threshold
+    "DEFAULT_MAX_RETRIES",
+    "DEFAULT_RETRY_STAGES",
     "RunCheckpointDAO",
     "SECONDARY_DOMAINS",
     "STAGES",
@@ -117,6 +129,7 @@ __all__ = [
     "build_claim_drafts",
     "build_claims_from_eus",
     "classify_source_tier",
+    "detect_grade_d_pct",
     "extract_from_content_with_llm",
     "extract_from_search_results_with_llm",
     "flush_observability",
@@ -138,9 +151,12 @@ __all__ = [
     "primary_source_count",
     "registrable_domain",
     "reset_run",
+    "retro_summary",
     "run_gate1_span",
     "run_gate2_numeric_drift",
+    "run_with_retro_loop",
     "same_unit",
+    "should_retry",
     "stage_trace",
     "upgrade_source_tier",
     "verify_entailment_batch",
