@@ -150,7 +150,7 @@ class EuDAO:
                 source_span, span_start, span_end,
                 extractor_model, extracted_at,
                 span_verified, numeric_drift, entailment_verdict, entailment_score,
-                claim_id, content_hash
+                claim_id, content_hash, embedding
             ) VALUES (
                 %(eu_id)s, %(run_id)s, %(dimension_id)s, %(claim)s, %(claim_type)s, %(entities)s,
                 %(norm_value)s, %(unit)s, %(value_as_of)s,
@@ -158,7 +158,7 @@ class EuDAO:
                 %(source_span)s, %(span_start)s, %(span_end)s,
                 %(extractor_model)s, %(extracted_at)s,
                 %(span_verified)s, %(numeric_drift)s, %(entailment_verdict)s, %(entailment_score)s,
-                %(claim_id)s, %(content_hash)s
+                %(claim_id)s, %(content_hash)s, %(embedding)s::vector
             )
             ON CONFLICT (eu_id) DO NOTHING
             """,

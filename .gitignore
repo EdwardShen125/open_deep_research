@@ -70,3 +70,6 @@ temp/
 
 # Experiment results — bench/eval run outputs, not source code
 tests/expt_results/
+
+# Baseline / one-shot script outputs (P0 baseline_e2e.py etc.)
+artifacts/

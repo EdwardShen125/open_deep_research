@@ -98,6 +98,13 @@ class EvidenceUnitV2(BaseModel):
     # 跨运行 dedup 锚(对应旧 dataclass 的 content_hash;可选)
     content_hash: Optional[str] = Field(None, min_length=64, max_length=64)
 
+    # 阶段 P0:真集成验证时由 embedder 写入;Pydantic 层只持有,不持久化。
+    # PG 落库经 EuDAO.upsert_many 走列 `embedding`,to_pg_row() 显式注入。
+    embedding: Optional[list[float]] = Field(
+        default=None,
+        description="BGE-M3 1024 维向量,用于归并 / HNSW 检索",
+    )
+
     # -------------------------------------------------------------------------
     # 校验器
     # -------------------------------------------------------------------------
@@ -173,6 +180,7 @@ class EvidenceUnitV2(BaseModel):
             "entailment_score": self.entailment_score,
             "claim_id": str(self.claim_id) if self.claim_id else None,
             "content_hash": self.content_hash,
+            "embedding": self.embedding,
         }
 
     @classmethod
