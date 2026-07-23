@@ -182,6 +182,7 @@ def extract_from_search_result(
     run_id: Optional[str] = None,
     sources_dao: Any = None,
     research_topic: Optional[str] = None,
+    dimension_id: Optional[str] = None,
 ) -> list[EvidenceUnit]:
     """Convert one Tavily/SearXNG search result dict to one or more EUs.
 
@@ -255,6 +256,7 @@ def extract_from_search_result(
             confidence=conf,
             extraction_method=method,
             run_id=run_id,
+            dimension_id=dimension_id,
         )
         eus.append(eu)
     return dedup_eus(eus)
@@ -266,12 +268,18 @@ def extract_from_search_results(
     run_id: Optional[str] = None,
     sources_dao: Any = None,
     research_topic: Optional[str] = None,
+    dimension_id: Optional[str] = None,
 ) -> list[EvidenceUnit]:
-    """Extract EUs from an iterable of search result dicts."""
+    """Extract EUs from an iterable of search result dicts.
+
+    ``dimension_id`` is stamped onto every EU produced so downstream
+    PG persistence has a non-NULL dimension_id for query (run, dimension).
+    """
     out: list[EvidenceUnit] = []
     for r in results:
         out.extend(extract_from_search_result(
-            r, run_id=run_id, sources_dao=sources_dao, research_topic=research_topic,
+            r, run_id=run_id, sources_dao=sources_dao,
+            research_topic=research_topic, dimension_id=dimension_id,
         ))
     return dedup_eus(out)
 

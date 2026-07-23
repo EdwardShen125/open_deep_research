@@ -337,6 +337,7 @@ class EvidenceUnit:
     extraction_method: str = "tavily_summary"
     extracted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     run_id: Optional[str] = None
+    dimension_id: Optional[str] = None  # 阶段 3 接通 planner 后,每个 EU 都带 dimension
     id: Optional[str] = None  # populated by upsert
 
     def __post_init__(self):
@@ -435,7 +436,7 @@ class EvidenceUnit:
 
         return EvidenceUnitV2(
             run_id=rid,
-            dimension_id=None,
+            dimension_id=self.dimension_id,
             claim=self.claim,
             claim_type=claim_type,
             entities=[e.name for e in self.entities],

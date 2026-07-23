@@ -47,13 +47,15 @@ class SubTopic:
     expected_entities: list[str] = field(default_factory=list)
     expected_keywords: list[str] = field(default_factory=list)
     rationale: str = ""
+    dimension_id: Optional[str] = None  # 市场维度:market_size/adoption/regulation/performance/ethics
     id: Optional[str] = None
 
     def __post_init__(self):
         if not self.title or not self.question:
             raise ValueError("SubTopic.title and .question must be non-empty")
-        # Stable id: hash of (title, question)
-        seed = (self.title + "|" + self.question).strip().lower()
+        # Stable id: hash of (title, question, dimension_id)
+        # 把 dimension 纳入 hash 避免不同 dimension 但 title 相同的 sub_topic 撞 id
+        seed = (self.title + "|" + self.question + "|" + (self.dimension_id or "")).strip().lower()
         self.id = "st-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
 
     def to_dict(self) -> dict:
@@ -141,48 +143,120 @@ def _question_for(clause: str) -> str:
 
 
 # =============================================================================
-# Plan construction (deterministic)
+# 维度注册表 — Runbook v1 5 个市场调研维度,每个 dimension 独立 search query
 # =============================================================================
+# 5 维度覆盖 market research 的标准五视角:
+#   - market_size    : 市场规模 / 营收 / CAGR / 预测
+#   - adoption       : 采用率 / 用户基数 / 部署 / 客户数
+#   - regulation     : 法规 / 合规 / 标准 / 政策 / 法律框架
+#   - performance    : 性能基准 / 技术能力 / 对比
+#   - ethics         : 伦理 / 偏见 / 隐私 / 社会影响
+#
+# 每个 dimension 的 query 模板拿 brief 作变量替换;5 个 sub_topic 并行 wave 0。
+# =============================================================================
+
+DIMENSION_TEMPLATES: dict[str, str] = {
+    "market_size":  "market size, revenue, CAGR, forecast, and growth rate of: {brief}",
+    "adoption":     "adoption rate, user base, deployment share, and customer count of: {brief}",
+    "regulation":   "regulation, compliance, standards, policy, and legal framework for: {brief}",
+    "performance":  "performance benchmarks, technical capabilities, and comparison of: {brief}",
+    "ethics":       "ethics, bias, privacy concerns, and societal impact of: {brief}",
+}
+
+DIMENSION_ORDER: list[str] = ["market_size", "adoption", "regulation", "performance", "ethics"]
+
+
+def _plan_dimensions(
+    brief: str,
+    *,
+    max_dim: int,
+) -> list[SubTopic]:
+    """Build one SubTopic per dimension (Wave 0)."""
+    short = brief.strip() or "(unspecified topic)"
+    subs: list[SubTopic] = []
+    for dim in DIMENSION_ORDER[:max_dim]:
+        q = DIMENSION_TEMPLATES[dim].format(brief=short)
+        subs.append(SubTopic(
+            title=dim,
+            question=q,
+            depends_on=[],
+            search_api="searxng",       # SearXNG fallback 已是默认;显式标注便于调度
+            parallelism="fan_out",
+            expected_entities=_entities_in(short),
+            expected_keywords=_keywords_in(short) + [dim],
+            rationale=f"dimension-driven search for: {dim}",
+            dimension_id=dim,
+        ))
+    return subs
+
 
 def plan_from_brief(
     brief: str,
     *,
     title: Optional[str] = None,
     max_subtopics: int = 6,
+    mode: str = "dimensions",  # 'dimensions' (推荐) | 'clauses' (旧行为)
 ) -> PlannerPlan:
     """Produce a deterministic PlannerPlan from a research brief.
 
-    The output is intentionally conservative (≤ max_subtopics) and may
-    run as a dry-run before the supervisor decomposes via LLM.
+    Modes
+    -----
+    - ``'dimensions'`` (default): 5 维度并行,每个 dimension 一个 search,
+      保证 EU 落到正确的 dimension_id(数据准确性导向)。``max_subtopics``
+      上限 = 5 + 1(context 可选)。
+
+    - ``'clauses'``: 旧行为,按 brief 子句拆分 sub_topic,dimension 全 None。
+      保留向后兼容。
     """
-    clauses = _split_into_clauses(brief)
     sub_topics: list[SubTopic] = []
-    if not clauses:
-        clauses = [brief or "(empty brief)"]
-    # First sub-topic is always the broad context; subsequent ones are
-    # the fine-grained clauses and depend on the context.
-    first = SubTopic(
-        title="context",
-        question=f"What is the context of: {clauses[0]}",
-        depends_on=[],
-        search_api="tavily",
-        parallelism="fan_out",
-        expected_entities=_entities_in(clauses[0]),
-        expected_keywords=_keywords_in(clauses[0]),
-        rationale="establishes baseline before sub-questions",
-    )
-    sub_topics.append(first)
-    for c in clauses[1:max_subtopics]:
-        sub_topics.append(SubTopic(
-            title=c[:40],
-            question=_question_for(c),
-            depends_on=[first.id],
+
+    if mode == "dimensions":
+        # Wave 0: 5 维度并行(优先,可被 max_subtopics 截断)
+        max_dim = min(max(0, max_subtopics - 1), len(DIMENSION_ORDER))
+        sub_topics.extend(_plan_dimensions(brief, max_dim=max_dim))
+        # 可选: 1 个 context 子句作 Wave 1(依赖所有 dimension)
+        clauses = _split_into_clauses(brief)
+        if clauses and len(sub_topics) < max_subtopics:
+            dep_ids = [s.id for s in sub_topics if s.id is not None]
+            sub_topics.append(SubTopic(
+                title="context",
+                question=f"What is the context of: {clauses[0]}",
+                depends_on=dep_ids,
+                search_api="searxng",
+                parallelism="serial",
+                expected_entities=_entities_in(clauses[0]),
+                expected_keywords=_keywords_in(clauses[0]),
+                rationale="establishes baseline across all dimensions",
+                dimension_id=None,  # context 不归属任何维度
+            ))
+    else:
+        # 旧 clause-based 行为,dimension_id 全 None
+        clauses = _split_into_clauses(brief)
+        if not clauses:
+            clauses = [brief or "(empty brief)"]
+        first = SubTopic(
+            title="context",
+            question=f"What is the context of: {clauses[0]}",
+            depends_on=[],
             search_api="tavily",
             parallelism="fan_out",
-            expected_entities=_entities_in(c),
-            expected_keywords=_keywords_in(c),
-            rationale=f"detail from brief clause: {c}",
-        ))
+            expected_entities=_entities_in(clauses[0]),
+            expected_keywords=_keywords_in(clauses[0]),
+            rationale="establishes baseline before sub-questions",
+        )
+        sub_topics.append(first)
+        for c in clauses[1:max_subtopics]:
+            sub_topics.append(SubTopic(
+                title=c[:40],
+                question=_question_for(c),
+                depends_on=[first.id],
+                search_api="tavily",
+                parallelism="fan_out",
+                expected_entities=_entities_in(c),
+                expected_keywords=_keywords_in(c),
+                rationale=f"detail from brief clause: {c}",
+            ))
+
     # Compute waves: Wave 0 = no-dependency topics; Wave 1+ = topics
     # whose deps have been scheduled in earlier waves.
     waves: list[list[str]] = []
@@ -200,12 +274,15 @@ def plan_from_brief(
         waves.append(wave)
         assigned.update(wave)
 
+    dim_n = sum(1 for s in sub_topics if s.dimension_id)
     return PlannerPlan(
         title=title or "Planner v2 plan",
         sub_topics=sub_topics,
         waves=waves,
-        notes=f"Deterministic decomposition into {len(sub_topics)} sub-topic(s) "
-              f"across {len(waves)} wave(s).",
+        notes=(
+            f"{mode} decomposition into {len(sub_topics)} sub-topic(s) "
+            f"({dim_n} dimensioned) across {len(waves)} wave(s)."
+        ),
     )
 
 

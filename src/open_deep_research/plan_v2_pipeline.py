@@ -214,11 +214,14 @@ async def run_pipeline(
                 run_id=rid,
                 sources_dao=sources_dao,
                 research_topic=st.title,
+                dimension_id=st.dimension_id,
             )
             all_eus.extend(eus)
         out.evidence_units = dedup_eus(all_eus)
-        logger.info("extracted %d unique EU across %d sub-topics",
-                    len(out.evidence_units), len(plan.sub_topics))
+        logger.info("extracted %d unique EU across %d sub-topics (with %d dimensioned)",
+                    len(out.evidence_units),
+                    len(plan.sub_topics),
+                    sum(1 for s in plan.sub_topics if s.dimension_id))
 
         if not out.evidence_units:
             out.error = "no evidence units extracted"
