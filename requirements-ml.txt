@@ -1,0 +1,14 @@
+# Heavy ML dependencies — NOT installed by `uv sync`.
+#
+# These pull torch (~750 MB) + nvidia-cuda-* wheels (~1.5 GB) which bloat
+# the API image and host venv for no benefit unless you're using the local
+# sentence-transformers embedder (`evidence/embedder.py`).
+#
+# Install on demand only:
+#   pip install -r requirements-ml.txt            # CPU torch
+#   pip install -r requirements-ml.txt --extra-index-url https://download.pytorch.org/whl/cu121   # CUDA 12.1
+#
+# Production recommendation: use the API embedder (`OPENAI_API_KEY` /
+# `MINIMAX_API_KEY` + a hosted embedding model) instead — no torch needed.
+
+sentence-transformers>=5.0.0

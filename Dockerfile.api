@@ -23,15 +23,15 @@ WORKDIR /app
 # Layer 1: deps only — cache-friendly, no source yet.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-extra ml
+    uv sync --frozen --no-install-project --no-dev
 
-# Layer 2: copy source + project install (setuptools build, no dev, no ml).
+# Layer 2: copy source + project install (setuptools build, no dev).
 COPY src ./src
 COPY langgraph.json pyproject.toml uv.lock README.md LICENSE ./
 COPY deploy/docker-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-extra ml
+    uv sync --frozen --no-dev
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
