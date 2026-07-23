@@ -59,8 +59,17 @@ class TestCoerceUuid:
         s = str(uuid.uuid4())
         assert _coerce_uuid(s) == uuid.UUID(s)
 
-    def test_invalid_str_returns_none(self):
-        assert _coerce_uuid("not-a-uuid") is None
+    def test_invalid_str_hashed_via_uuid5(self):
+        # 非 UUID 字符串用 uuid5(NAMESPACE_DNS, v) 派生稳定 UUID,
+        # 保证 pipeline run_id='r-202607...' 这种字符串能落 PG UUID 列。
+        from uuid import uuid5, NAMESPACE_DNS
+        assert _coerce_uuid("not-a-uuid") == uuid5(NAMESPACE_DNS, "not-a-uuid")
+
+    def test_invalid_str_hash_is_stable(self):
+        # 同一字符串 → 同一 UUID hash(幂等)
+        a = _coerce_uuid("r-20260723041315")
+        b = _coerce_uuid("r-20260723041315")
+        assert a == b
 
     def test_none_returns_none(self):
         assert _coerce_uuid(None) is None
@@ -146,9 +155,10 @@ class TestEuDaoUpsertManyStructure:
             "source_span", "extractor_model", "extracted_at",
         ):
             assert required in row, f"missing column: {required}"
-        # 类型断言
-        assert isinstance(row["eu_id"], str)
-        assert isinstance(row["run_id"], str)
+        # UUID 列类型:UUID 对象(psycopg 自动适配 str/UUID,这里返回 UUID 更明确)
+        from uuid import UUID as _UUID
+        assert isinstance(row["eu_id"], _UUID)
+        assert isinstance(row["run_id"], _UUID)
 
 
 class TestClaimDaoUpsertManyStructure:

@@ -87,9 +87,10 @@ def test_eu_pg_row_roundtrip():
         entailment_verdict="entailed",
     )
     row = eu.to_pg_row()
-    # 主键以 str 形式落地(UUID → str 兼容 PG)
-    assert isinstance(row["eu_id"], str)
-    assert isinstance(row["run_id"], str)
+    # 主键以 UUID 形式落地(psycopg 自动适配 PG UUID 列)
+    from uuid import UUID as _UUID
+    assert isinstance(row["eu_id"], _UUID)
+    assert isinstance(row["run_id"], _UUID)
     # 复原
     eu2 = EvidenceUnitV2.from_pg_row(row)
     assert eu2.eu_id == eu.eu_id
