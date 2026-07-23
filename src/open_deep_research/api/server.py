@@ -42,6 +42,38 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# P1.1: 从 .env 文件加载环境变量(uvicorn 子进程不自动继承 shell 环境)
+# TAVILY_API_KEY / SEARXNG_URL / POSTGRES_* 等必须在 server 启动时显式存在
+# 优先级:已有 shell env > .env > 默认 None
+def _load_dotenv_fallback(path: str) -> None:
+    """轻量 .env 加载,不引入 python-dotenv 依赖。
+
+    解析 `KEY=VALUE` 行,空行 / 注释行 / 带引号都支持。已存在的 env var 不覆盖。
+    """
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except OSError as e:
+        logger = logging.getLogger("api.server")
+        logger.warning("could not read .env from %s: %s", path, e)
+
+
+_load_dotenv_fallback(os.path.join(os.path.dirname(ROOT), ".env"))
+
+logger = logging.getLogger("api.server")
+
 from open_deep_research.evidence.eu_dao import ClaimDAO, EuDAO, RunCheckpointDAO
 from open_deep_research.evidence.report import (
     ClaimStats,
@@ -49,8 +81,6 @@ from open_deep_research.evidence.report import (
     ReportResult,
     ReportSection,
 )
-
-logger = logging.getLogger("api.server")
 
 
 # =============================================================================

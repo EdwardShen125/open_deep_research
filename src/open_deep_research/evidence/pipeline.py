@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from open_deep_research.evidence.independence import (
     grade_claim,
@@ -41,7 +41,8 @@ def build_claims_from_eus(
     embeddings: Optional[Any] = None,
     page_emb: Optional[dict[str, Any]] = None,
     cosine_threshold: float = 0.92,
-) -> list[ClaimV2]:
+    return_eu_map: bool = False,
+) -> Union[list[ClaimV2], tuple[list[ClaimV2], dict[str, str]]]:
     """端到端:EU 列表 → ClaimV2 列表(含 grade)。
 
     步骤:
@@ -52,10 +53,16 @@ def build_claims_from_eus(
       5. grade_claim → A / B / C / D
       6. ClaimDraft → ClaimV2 落库
 
+    默认返 list[ClaimV2](向后兼容)。
+    return_eu_map=True 时返 (claims, eu_to_claim_id) — eu_id(str) → claim_id(str)
+    用于 P1.2 claim_id 回填链路(让 evidence_unit.claim_id 字段有值)。
+
     返回:ClaimV2 列表。每个 ClaimV2 的 eu_count / independent_source_count /
     primary_source_count 都已填好。ClaimV2.claim_id 是新生成 UUID。
     """
     if not eus:
+        if return_eu_map:
+            return [], {}
         return []
 
     # 1. 升级 tier
@@ -63,6 +70,9 @@ def build_claims_from_eus(
 
     # 2. 归并
     groups = merge_units(eus_upgraded, embeddings=embeddings, cosine_threshold=cosine_threshold)
+
+    # P1.2: 收集 eu_id -> claim_id 映射 (用于 EU.claim_id 字段回填)
+    eu_to_claim_id: dict[str, str] = {}
 
     # 3. 草稿
     drafts = build_claim_drafts(eus_upgraded, groups)
@@ -93,7 +103,7 @@ def build_claims_from_eus(
             "unknown",
         )
 
-        claims.append(ClaimV2(
+        claim = ClaimV2(
             run_id=group_eus[0].run_id,
             dimension_id=dimension_id,
             canonical_claim=draft.canonical_claim,
@@ -111,13 +121,23 @@ def build_claims_from_eus(
             conflicting_values=draft.conflicting_values,
             grade=grade,
             grade_reason=reason,
-        ))
+        )
+
+        # P1.2: 记录 group 中每个 EU 的 claim_id 映射
+        if return_eu_map:
+            for idx in draft.eu_indices:
+                eu_id_str = str(eus_upgraded[idx].eu_id)
+                eu_to_claim_id[eu_id_str] = str(claim.claim_id)
+
+        claims.append(claim)
 
     logger.info(
         "build_claims_from_eus: %d EU → %d claims (grade dist: %s)",
         len(eus), len(claims),
         {g: sum(1 for c in claims if c.grade == g) for g in "ABCD"},
     )
+    if return_eu_map:
+        return claims, eu_to_claim_id
     return claims
 
 

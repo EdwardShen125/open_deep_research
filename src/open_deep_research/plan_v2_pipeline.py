@@ -272,23 +272,35 @@ async def run_pipeline(
         #   3. build_claim_drafts — 每个 group 生成 canonical claim
         #   4. grade_claim — A/B/C/D 评级 (基于 independent + primary count)
         #   5. claim 落 PG (evidence.claim 表) — 让 /runs/{id} 的 claim_stats 立刻可观测
+        # P1.2: 同时拿 eu_to_claim_id map 用于回填 evidence_unit.claim_id 字段
         try:
             if v2_eus:
-                claims = build_claims_from_eus(v2_eus)
+                result = build_claims_from_eus(v2_eus, return_eu_map=True)
+                if isinstance(result, tuple):
+                    claims, eu_to_claim_id = result
+                else:
+                    claims, eu_to_claim_id = result, {}
                 out.claims = claims
                 out.claim_grade_dist = {
                     g: sum(1 for c in claims if c.grade == g)
                     for g in "ABCD"
                 }
                 logger.info(
-                    "build_claims_from_eus: %d EU -> %d claims (grade dist: %s)",
-                    len(v2_eus), len(claims), out.claim_grade_dist,
+                    "build_claims_from_eus: %d EU -> %d claims (grade dist: %s, eu_map=%d)",
+                    len(v2_eus), len(claims), out.claim_grade_dist, len(eu_to_claim_id),
                 )
                 if claims:
                     with ClaimDAO() as cdao:
                         cdao.upsert_many(claims)
-                    # Phase 3.4: 回填 EU.claim_id — 用 claim 中所含 entities
-                    # 反查 EU.content_hash 不可靠,留 P1 单独做 (Runbook §3.4 完整版)。
+                    # P1.2: 回填 evidence_unit.claim_id 字段,让溯源完整
+                    if eu_to_claim_id:
+                        with EuDAO() as edao:
+                            for eu_id_str, claim_id_str in eu_to_claim_id.items():
+                                edao.update_claim_id(eu_id_str, claim_id_str)
+                        logger.info(
+                            "claim_id 回填: %d EU -> claim_id (溯源链路完成)",
+                            len(eu_to_claim_id),
+                        )
         except Exception as merge_e:
             import warnings
             warnings.warn(
