@@ -275,6 +275,25 @@ class EuDAO:
         )
         return {r[0]: r[1] for r in cur.fetchall()}
 
+    def count_by_source_domain(self, run_id: str | UUID, limit: int = 10) -> list[tuple[str, int]]:
+        """返回按 EU 数量排序的 top-N source_domain。供 server 端 /runs/{id}
+        聚合 stats 使用 — 让 dashboard 立刻看到来源分布,无须 list_by_run 全
+        量拉回。
+        """
+        rid = _coerce_uuid(run_id)
+        if rid is None:
+            return []
+        cur = self._cur()
+        cur.execute(
+            """
+            SELECT COALESCE(source_domain, '<unknown>') AS dom, count(*)
+            FROM evidence.evidence_unit WHERE run_id = %s
+            GROUP BY dom ORDER BY 2 DESC LIMIT %s
+            """,
+            (rid, limit),
+        )
+        return [(r[0], r[1]) for r in cur.fetchall()]
+
     def search_by_embedding(
         self,
         run_id: str | UUID,

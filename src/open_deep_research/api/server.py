@@ -147,6 +147,7 @@ class RunStatusResponse(BaseModel):
     error: Optional[str]
     stages: list[StageProgress]
     claim_stats: Optional[dict[str, Any]] = None
+    eu_stats: Optional[dict[str, Any]] = None  # 总数 + by_dimension + top source_domain
 
 
 class ReportResponse(BaseModel):
@@ -156,6 +157,7 @@ class ReportResponse(BaseModel):
     body_markdown: str
     sections: list[dict[str, Any]]
     claim_stats: Optional[dict[str, Any]] = None
+    eu_stats: Optional[dict[str, Any]] = None
     failures: list[dict[str, Any]]
     warnings: list[str]
     generated_at: str
@@ -322,20 +324,19 @@ async def start_run(req: StartRunRequest, background_tasks: BackgroundTasks):
 
 @app.get("/runs/{run_id}", response_model=RunStatusResponse)
 async def get_run_status(run_id: str):
-    """查 run 状态 + checkpoint stage 进度。"""
+    """查 run 状态 + stage 进度 + claim_stats + eu_stats。"""
     try:
         UUID(run_id)
     except ValueError:
         raise HTTPException(400, f"run_id must be a valid UUID, got {run_id!r}")
 
-    # 优先从 registry(进程内)读最新状态
     meta = _RUN_REGISTRY.get(run_id)
 
-    # 从 PG 读 checkpoint stages
+    # 读 checkpoint stages
     stages: list[StageProgress] = []
     try:
-        with RunCheckpointDAO() as rdao:
-            cur = rdao._cur()
+        with RunCheckpointDAO() as ckdao:
+            cur = ckdao._cur()
             cur.execute(
                 "SELECT stage, status, started_at, finished_at FROM evidence.run_checkpoint "
                 "WHERE run_id = %s ORDER BY started_at",
@@ -346,7 +347,7 @@ async def get_run_status(run_id: str):
     except Exception as e:
         logger.warning("checkpoint read for %s failed: %s", run_id, e)
 
-    # claim_stats(从 PG 聚合)
+    # claim_stats(从 PG 聚合 — phase 3 闸 2 才有 claim)
     claim_stats: Optional[dict[str, Any]] = None
     try:
         with ClaimDAO() as cdao:
@@ -356,6 +357,13 @@ async def get_run_status(run_id: str):
             claim_stats = stats.model_dump()
     except Exception as e:
         logger.warning("claim_stats for %s failed: %s", run_id, e)
+
+    # eu_stats(从 PG 聚合 — claim_stats 还没接时,也能立刻看见 EU 分布)
+    eu_stats: Optional[dict[str, Any]] = None
+    try:
+        eu_stats = _build_eu_stats(run_id)
+    except Exception as e:
+        logger.warning("eu_stats for %s failed: %s", run_id, e)
 
     duration_ms: Optional[float] = None
     started_at = meta["started_at"] if meta else None
@@ -379,7 +387,26 @@ async def get_run_status(run_id: str):
         error=meta.get("error") if meta else "run not in registry (maybe restarted)",
         stages=stages,
         claim_stats=claim_stats,
+        eu_stats=eu_stats,
     )
+
+
+def _build_eu_stats(run_id: str) -> dict[str, Any]:
+    """从 PG 聚合 EU 统计:{total, by_dimension, top_source_domains}。
+
+    claim_stats 是 phase 3 闸 2 才填的;eu_stats 立刻可观测 — 跑完一次
+    run 立刻能看到 EU 总数 + 5 维度分布 + top source_domain。
+    """
+    with EuDAO() as edao:
+        total = edao.count_by_run(run_id)
+        by_dim = edao.count_by_dimension(run_id)
+        top_doms = edao.count_by_source_domain(run_id, limit=10)
+    return {
+        "total": total,
+        "by_dimension": dict(by_dim),  # {market_size: 48, adoption: 17, ...}
+        "top_source_domains": [{"domain": d, "count": c} for d, c in top_doms],
+        "source_domain_count": len(top_doms),
+    }
 
 
 @app.get("/runs/{run_id}/report", response_model=ReportResponse)
@@ -448,6 +475,7 @@ async def get_run_report(run_id: str):
         body_markdown="\n".join(body_lines),
         sections=sections,
         claim_stats=stats.model_dump(),
+        eu_stats=_build_eu_stats(run_id),
         failures=[],
         warnings=[],
         generated_at=datetime.now(timezone.utc).isoformat(),
