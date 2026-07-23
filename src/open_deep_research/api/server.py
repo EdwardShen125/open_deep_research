@@ -147,7 +147,7 @@ class RunStatusResponse(BaseModel):
     error: Optional[str]
     stages: list[StageProgress]
     claim_stats: Optional[dict[str, Any]] = None
-    eu_stats: Optional[dict[str, Any]] = None  # 总数 + by_dimension + top source_domain
+    eu_stats: Optional[dict[str, Any]] = None  # {total, by_dimension, top_source_domains, by_source_tier}
 
 
 class ReportResponse(BaseModel):
@@ -392,20 +392,23 @@ async def get_run_status(run_id: str):
 
 
 def _build_eu_stats(run_id: str) -> dict[str, Any]:
-    """从 PG 聚合 EU 统计:{total, by_dimension, top_source_domains}。
+    """从 PG 聚合 EU 统计:{total, by_dimension, top_source_domains, by_source_tier}。
 
     claim_stats 是 phase 3 闸 2 才填的;eu_stats 立刻可观测 — 跑完一次
-    run 立刻能看到 EU 总数 + 5 维度分布 + top source_domain。
+    pipeline 就能在 /runs/{id} 看到 EU 分布,不需要等 claim pipeline。
+    by_source_tier (P0) 让数据准确性导向可量化 (primary 占比)。
     """
     with EuDAO() as edao:
         total = edao.count_by_run(run_id)
         by_dim = edao.count_by_dimension(run_id)
         top_doms = edao.count_by_source_domain(run_id, limit=10)
+        by_tier = edao.count_by_source_tier(run_id)
     return {
         "total": total,
         "by_dimension": dict(by_dim),  # {market_size: 48, adoption: 17, ...}
         "top_source_domains": [{"domain": d, "count": c} for d, c in top_doms],
         "source_domain_count": len(top_doms),
+        "by_source_tier": dict(by_tier),  # {primary: 137, secondary: 0, ...}
     }
 
 

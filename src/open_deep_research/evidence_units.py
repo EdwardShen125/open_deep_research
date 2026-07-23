@@ -338,6 +338,7 @@ class EvidenceUnit:
     extracted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     run_id: Optional[str] = None
     dimension_id: Optional[str] = None  # 阶段 3 接通 planner 后,每个 EU 都带 dimension
+    source_tier: Optional[str] = None  # 'primary'/'secondary'/'tertiary'/'ugc';None = 未分类
     id: Optional[str] = None  # populated by upsert
 
     def __post_init__(self):
@@ -418,9 +419,10 @@ class EvidenceUnit:
                 norm_value = Decimal(str(n0.value_min))
             unit = n0.unit
 
-        # source_tier 默认 tertiary(阶段 3 白名单升级)
-        # 实际 production 抽取器应该根据 source_domain 决定,这里保守走 default
-        source_tier: SourceTier = "tertiary"
+        # source_tier: 透传 self.source_tier,默认 tertiary(未分类时)
+        # 实际 production 抽取器应该根据 source_domain 决定 (eu_extractor._classify_source_tier)
+        from open_deep_research.evidence.schema import SourceTier
+        source_tier: SourceTier = self.source_tier or "tertiary"  # type: ignore[assignment]
 
         # run_id 转换:str → UUID(str)
         from uuid import UUID as _UUID, uuid5, NAMESPACE_DNS

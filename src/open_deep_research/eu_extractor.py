@@ -54,6 +54,88 @@ from open_deep_research.sources_dao import SourcesDAO, SourceRecord, canonicaliz
 
 
 # =============================================================================
+# Source tier classifier (P0 source_tier 真实分级)
+# =============================================================================
+# 4 个 tier (从 SourceTier Literal):
+#   primary   — peer-reviewed 研究 / 官方财报 / 监管文件 (arxiv / SEC / 政府)
+#   secondary — 行业新闻 / 媒体 / 厂商博客 (techcrunch / reuters / vendor blog)
+#   tertiary  — 维基 / 百科 (wikipedia / britannica)
+#   ugc       — 用户内容 / 论坛 (reddit / twitter / 个人博客)
+#
+# 数据准确性导向 (Runbook v1 §3.2): arxiv=primary 是 EDR 市场调研的最佳源
+# (peer-reviewed 研究数据), wiki=tertiary 权重低, 论坛最低。
+# 新增域名请加 _TIER_RULES,_classify_source_tier 自动匹配。
+
+_TIER_RULES: list[tuple[str, str]] = [
+    # (substring, tier) — 长 substring 排前 (避免 'gov' 抢 'reuters.com' 的 'co')
+    # primary: peer-reviewed / 官方 / 监管
+    ("arxiv.org", "primary"),
+    ("europa.eu", "primary"),
+    ("sec.gov", "primary"),
+    (".gov", "primary"),
+    (".edu", "primary"),
+    # secondary: 行业媒体 / 厂商 blog / 主流新闻
+    ("reuters.com", "secondary"),
+    ("bloomberg.com", "secondary"),
+    ("wsj.com", "secondary"),
+    ("ft.com", "secondary"),
+    ("nytimes.com", "secondary"),
+    ("bbc.com", "secondary"),
+    ("bbc.co.uk", "secondary"),
+    ("cnn.com", "secondary"),
+    ("theguardian.com", "secondary"),
+    ("forbes.com", "secondary"),
+    ("techcrunch.com", "secondary"),
+    ("wired.com", "secondary"),
+    ("zdnet.com", "secondary"),
+    ("cnet.com", "secondary"),
+    ("venturebeat.com", "secondary"),
+    ("darkreading.com", "secondary"),
+    ("threatpost.com", "secondary"),
+    ("securityweek.com", "secondary"),
+    ("cyberscoop.com", "secondary"),
+    ("theregister.com", "secondary"),
+    ("infosecurity-magazine.com", "secondary"),
+    ("gartner.com", "secondary"),
+    ("forrester.com", "secondary"),
+    ("idc.com", "secondary"),
+    ("mckinsey.com", "secondary"),
+    # tertiary: 百科 / 知识库
+    ("wikipedia.org", "tertiary"),
+    ("wikimedia.org", "tertiary"),
+    ("britannica.com", "tertiary"),
+    ("baike.baidu.com", "tertiary"),
+    # ugc: 论坛 / 社交 / 个人博客
+    ("reddit.com", "ugc"),
+    ("quora.com", "ugc"),
+    ("twitter.com", "ugc"),
+    ("x.com", "ugc"),
+    ("facebook.com", "ugc"),
+    ("linkedin.com", "ugc"),
+    ("medium.com", "ugc"),
+    ("substack.com", "ugc"),
+]
+
+
+def _classify_source_tier(url: str) -> str:
+    """基于 url 域名真实分级 primary/secondary/tertiary/ugc。
+
+    未知域名 -> 'secondary' (默认中位),保守可被下游 verifier 重新评估。
+    """
+    if not url:
+        return "secondary"
+    host = urlsplit(url).hostname or ""
+    host = host.lower()
+    for substr, tier in _TIER_RULES:
+        if substr in host:
+            return tier
+    # 启发式兜底:未知 .org / .com 视为 secondary
+    if host.endswith(".org") or host.endswith(".com") or host.endswith(".net"):
+        return "secondary"
+    return "secondary"
+
+
+# =============================================================================
 # Sentence splitter — handles CJK and ASCII punctuation
 # =============================================================================
 
@@ -239,6 +321,8 @@ def extract_from_search_result(
         sentences = [text_block.strip()]
 
     eus: list[EvidenceUnit] = []
+    # P0 source_tier 真实分级: 一次分类,所有 sentence EU 共享
+    src_tier = _classify_source_tier(url)
     for sent in sentences:
         quote = (sent[:200] + "…") if len(sent) > 200 else sent
         nums = extract_numbers(sent)
@@ -257,6 +341,7 @@ def extract_from_search_result(
             extraction_method=method,
             run_id=run_id,
             dimension_id=dimension_id,
+            source_tier=src_tier,
         )
         eus.append(eu)
     return dedup_eus(eus)
@@ -292,4 +377,5 @@ __all__ = [
     "split_sentences", "mine_entities",
     "extract_from_search_result", "extract_from_search_results",
     "extract_numbers",
+    "_classify_source_tier",  # P0 source_tier 真实分级
 ]

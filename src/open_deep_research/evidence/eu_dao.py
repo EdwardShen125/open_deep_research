@@ -294,6 +294,26 @@ class EuDAO:
         )
         return [(r[0], r[1]) for r in cur.fetchall()]
 
+    def count_by_source_tier(self, run_id: str | UUID) -> dict[str, int]:
+        """P0: 按 source_tier (primary/secondary/tertiary/ugc) 聚合 EU 数量。
+
+        让 /runs/{id} 的 eu_stats 能立刻显示"primary 占多少比例",反映数据
+        准确性导向。P0 数据准确性提升的关键指标。
+        """
+        rid = _coerce_uuid(run_id)
+        if rid is None:
+            return {}
+        cur = self._cur()
+        cur.execute(
+            """
+            SELECT COALESCE(source_tier, '<unknown>') AS tier, count(*)
+            FROM evidence.evidence_unit WHERE run_id = %s
+            GROUP BY tier
+            """,
+            (rid,),
+        )
+        return {r[0]: r[1] for r in cur.fetchall()}
+
     def search_by_embedding(
         self,
         run_id: str | UUID,
