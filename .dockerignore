@@ -1,0 +1,51 @@
+# 不进镜像的杂物 — 速度 + 体积
+.git
+.gitignore
+.venv
+.venv-*
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+*.egg-info
+*.egg
+dist/
+build/
+tests/expt_results/
+tests/.benchmarks/
+.benchmarks/
+.artifacts/
+docs/_build/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Secrets (绝不入镜像 — 走 env / docker-compose env_file)
+.env
+.env.*
+*.env
+deploy/.env
+
+# Logs
+*.log
+logs/
+
+# 不在镜像里的临时,等会从 scratch 起
+.benchmarks/
+
+# 大型 model cache (sentence-transformers / crawl4ai cache 单独 volume)
+models/
+.cache/
+
+# 仓内没必要复刻的部署产物本身
+Dockerfile*
+docker-compose*
+.dockerignore

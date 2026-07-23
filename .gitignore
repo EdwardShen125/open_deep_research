@@ -27,8 +27,10 @@ wheels/
 # Virtual environments
 venv/
 env/
-ENV/
+# Secrets (绝不入镜像 — 走 env / docker-compose env_file)
 .env
+deploy/.env
+.envrc
 
 # IDE specific files
 .idea/

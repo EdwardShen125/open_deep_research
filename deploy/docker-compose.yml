@@ -100,3 +100,76 @@ services:
     volumes:
       - ./..:/work
     command: ['sleep', 'infinity']
+
+  # ---------------------------------------------------------------------------
+  # Open Deep Research API - uvicorn /runs /report /healthz 入口。
+  # 镜像由 ../Dockerfile.api 构建，profile=full / api 时启动。
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile.api
+    image: odr/api:latest
+    container_name: odr-api
+    restart: unless-stopped
+    profiles: ['full', 'api']
+    environment:
+      # 容器内通过 service name 访问基础设施
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: '5432'
+      POSTGRES_DB: ${POSTGRES_DB:-odr_v2}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-odr_v2_pg_pass_change_me}
+      SEARXNG_URL: http://searxng:8080
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/anthropic}
+      ENV_FILE: /app/.env
+      PORT: '2024'
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - ${ODR_DATA_DIR:-./data}:/data
+    networks:
+      pipeline-internal:
+        aliases: [odr-api]
+      data:
+        aliases: [odr-api]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      searxng:  { condition: service_healthy }
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:2024/healthz']
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-2024}:2024"
+
+  # ---------------------------------------------------------------------------
+  # Crawl4AI sidecar - api 镜像不需要自包含 chromium，共享一个 sidecar。
+  # (crawler.py 后续 http://crawler:11235 接入，在此先占位)
+  # ---------------------------------------------------------------------------
+  crawler-sidecar:
+    image: unclecode/crawl4ai:latest
+    container_name: odr-crawler
+    restart: unless-stopped
+    profiles: ['full']
+    networks:
+      pipeline-internal:
+        aliases: [crawler]
+    environment:
+      CRAWL4AI_API_PORT: '11235'
+    ports:
+      - "${CRAWLER_BIND:-127.0.0.1}:${CRAWLER_PORT:-11235}:11235"
+
+# =============================================================================
+# Quick smoke after `make docker-up`:
+#   curl -s http://127.0.0.1:2024/healthz
+#   curl -s -X POST http://127.0.0.1:2024/runs -H 'content-type: application/json' \
+#     -d '{"query":"open source LLM framework 2025","mode":"evidence-only"}'
+# =============================================================================
