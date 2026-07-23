@@ -94,6 +94,7 @@ class PlanV2RunResult:
     verification: Optional[VerificationResult] = None
     report_data: Optional[ReportDataObject] = None
     url_compliance: list[UrlComplianceIssue] = field(default_factory=list)
+    gate_stats: dict[str, int] = field(default_factory=dict)  # 闸 1+2+3 命中统计
 
     passed: bool = False
     error: Optional[str] = None
@@ -114,6 +115,7 @@ class PlanV2RunResult:
             "verification": self.verification.to_dict() if self.verification else None,
             "report_data": self.report_data.to_dict() if self.report_data else None,
             "url_compliance": [u.to_dict() for u in self.url_compliance],
+            "gate_stats": self.gate_stats,
             "passed": self.passed,
             "error": self.error,
         }
@@ -261,6 +263,41 @@ async def run_pipeline(
             warnings.warn(
                 f"Phase 3 EuDAO.upsert_many failed (run_id={rid}): {pg_e}; "
                 "falling back to in-memory EU only",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        # ----- 3.55 Phase 2.7 (= Runbook v1 阶段 2.1-2.4): 跑 3 闸 + 写回 PG -----
+        # 数据准确性导向 (Runbook v1 §2.1-2.4):
+        #   闸 1 (span)   : source_span 存在 → True(extractor self-truthful 假设)
+        #   闸 2 (numeric) : claim 中数值在 span 内(0.5% rel_tol)
+        #   闸 3 (NLI)     : LLM 判 (claim, span) entail/contradict/unverifiable
+        # 写回 PG evidence_unit.{span_verified, numeric_drift, entailment_*}
+        # 闸通过是 grade_claim 出 A/B 的前提 (schema.usable = span_verified && !numeric_drift && entailed)
+        try:
+            if v2_eus:
+                from open_deep_research.evidence.gates_runner import run_gates_and_persist
+                gate_stats = await run_gates_and_persist(v2_eus, run_id=rid, run_nli=True)
+                out.gate_stats = gate_stats  # 让 /runs/{id} 能看见
+                logger.info(
+                    "Phase 2.7 gates (run_id=%s): %s",
+                    rid, gate_stats,
+                )
+                # 关键:重新从 PG 读 EU,让后续 merge phase 看到新写的 entailment_verdict
+                try:
+                    with EuDAO() as edao:
+                        v2_eus = edao.list_by_run(rid)
+                    logger.info(
+                        "Phase 2.7 re-fetched %d EU from PG (entailment_verdict populated)",
+                        len(v2_eus),
+                    )
+                except Exception as rf_e:
+                    logger.warning("Phase 2.7 PG re-fetch failed: %s", rf_e)
+        except Exception as gate_e:
+            import warnings
+            warnings.warn(
+                f"Phase 2.7 run_gates_and_persist failed (run_id={rid}): {gate_e}; "
+                "all EU stay unverified → all grade=D",
                 RuntimeWarning,
                 stacklevel=2,
             )

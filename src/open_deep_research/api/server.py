@@ -178,6 +178,7 @@ class RunStatusResponse(BaseModel):
     stages: list[StageProgress]
     claim_stats: Optional[dict[str, Any]] = None
     eu_stats: Optional[dict[str, Any]] = None  # {total, by_dimension, top_source_domains, by_source_tier}
+    gate_stats: Optional[dict[str, int]] = None  # {total, span_verified, numeric_drift, entailed, contradicted, unverifiable}
 
 
 class ReportResponse(BaseModel):
@@ -398,6 +399,13 @@ async def get_run_status(run_id: str):
     except Exception as e:
         logger.warning("eu_stats for %s failed: %s", run_id, e)
 
+    # gate_stats (Phase 2.7 闸 1+2+3 命中统计)
+    gate_stats: Optional[dict[str, int]] = None
+    try:
+        gate_stats = _build_gate_stats(run_id)
+    except Exception as e:
+        logger.warning("gate_stats for %s failed: %s", run_id, e)
+
     duration_ms: Optional[float] = None
     started_at = meta["started_at"] if meta else None
     finished_at = meta.get("finished_at") if meta else None
@@ -421,6 +429,7 @@ async def get_run_status(run_id: str):
         stages=stages,
         claim_stats=claim_stats,
         eu_stats=eu_stats,
+        gate_stats=gate_stats,
     )
 
 
@@ -442,6 +451,54 @@ def _build_eu_stats(run_id: str) -> dict[str, Any]:
         "top_source_domains": [{"domain": d, "count": c} for d, c in top_doms],
         "source_domain_count": len(top_doms),
         "by_source_tier": dict(by_tier),  # {primary: 137, secondary: 0, ...}
+    }
+
+
+def _build_gate_stats(run_id: str) -> dict[str, int]:
+    """从 PG 聚合 Phase 2.7 闸 1+2+3 命中统计。
+
+    返回:
+      {
+        "total": 122,
+        "span_verified": 110,    # 闸 1
+        "numeric_drift": 3,      # 闸 2: 数值漂移
+        "entailed": 80,          # 闸 3 NLI
+        "contradicted": 2,
+        "unverifiable": 28,
+      }
+    """
+    with EuDAO() as edao:
+        cur = edao._cur()
+        cur.execute(
+            "SELECT span_verified, numeric_drift, "
+            "       COALESCE(entailment_verdict, 'unset') "
+            "FROM evidence.evidence_unit WHERE run_id = %s",
+            (run_id,),
+        )
+        rows = cur.fetchall()
+
+    total = len(rows)
+    span_verified = 0
+    numeric_drift = 0
+    entailed = contradicted = unverifiable = 0
+    for sv, nd, ent in rows:
+        if sv:
+            span_verified += 1
+        if nd:
+            numeric_drift += 1
+        if ent == "entailed":
+            entailed += 1
+        elif ent == "contradicted":
+            contradicted += 1
+        elif ent in ("unverifiable", "unknown", "partial", "unset"):
+            unverifiable += 1
+    return {
+        "total": total,
+        "span_verified": span_verified,
+        "numeric_drift": numeric_drift,
+        "entailed": entailed,
+        "contradicted": contradicted,
+        "unverifiable": unverifiable,
     }
 
 

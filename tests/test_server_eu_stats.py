@@ -26,7 +26,7 @@ def test_build_eu_stats_returns_typed_dict(server_module):
     stats = server_module._build_eu_stats(fake_run)
     assert isinstance(stats, dict)
     assert set(stats.keys()) == {
-        "total", "by_dimension", "top_source_domains", "source_domain_count",
+        "total", "by_dimension", "top_source_domains", "source_domain_count", "by_source_tier",
     }
     assert stats["total"] == 0
     assert stats["by_dimension"] == {}
