@@ -112,6 +112,21 @@ def test_unified_search_falls_back_when_primary_raises():
     print("  ✓ UnifiedSearch swallows primary error → tries fallback")
 
 
+def test_unified_search_falls_back_when_primary_is_none():
+    """Regression: when primary is None (e.g. TAVILY_API_KEY unset),
+    fallback must run. Previously the `or self.primary is not None`
+    guard meant the fallback was silently skipped, leaving the caller
+    with AllProvidersFailed and an empty failed_providers list."""
+    fallback = FakeProvider("searxng", results=[_sr("https://x.com/x", "X")])
+    us = UnifiedSearch(primary=None, fallback=fallback)
+    resp = asyncio.run(us.search(SearchQuery(queries=["x"])))
+    assert resp.fallback_used
+    assert resp.source == "searxng"
+    assert len(resp.results) == 1
+    assert not resp.failed_providers
+    print("  ✓ UnifiedSearch falls back when primary=None (regression)")
+
+
 def test_unified_search_all_providers_failed():
     primary = FakeProvider("tavily", fail=True)
     fallback = FakeProvider("searxng", fail=True)
