@@ -1,0 +1,34 @@
+[Unit]
+Description=Open Deep Research v2 — API server (uvicorn)
+After=network-online.target
+Wants=network-online.target
+# 如果走 docker compose,这里配 docker.service 而不是直接跑;保留两个 mode:
+#   - EnvironmentFile= 走 host 直接 uvicorn (本 service)
+#   - 整 stack 起来靠 docker compose:  `make docker-up`
+
+[Service]
+Type=simple
+User=odr
+Group=odr
+WorkingDirectory=/opt/open_deep_research
+EnvironmentFile=/etc/open_deep_research/open_deep_research.env
+ExecStart=/opt/open_deep_research/.venv/bin/uvicorn open_deep_research.api.server:app \
+    --host 0.0.0.0 --port 2024 --log-level info
+Restart=always
+RestartSec=5
+
+# 安全
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/open_deep_research
+PrivateTmp=true
+LimitNOFILE=65536
+
+# 日志 → journald (loki/fluentd 抓走)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=odr-api
+
+[Install]
+WantedBy=multi-user.target

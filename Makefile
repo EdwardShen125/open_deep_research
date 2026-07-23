@@ -72,6 +72,23 @@ e2e:                        ## 端到端 smoke (baseline_e2e.py)
 	@echo ">> make sure api is up on $${PORT:-2024}, or run \`make docker-up\` first"
 	.venv/bin/python scripts/baseline_e2e.py
 
+.PHONY: backup
+backup:                     ## pg_dump 当前 PG 到 ./backups/
+	chmod +x scripts/backup_pg.sh
+	./scripts/backup_pg.sh
+
+.PHONY: restore
+restore:                    ## 恢复 ./*.sql.gz 到 PG(从最近的 backup)
+	chmod +x scripts/restore_pg.sh
+	./scripts/restore_pg.sh
+
+.PHONY: install-systemd
+install-systemd:            ## 装 systemd unit(host 跑 uvicorn 模式)
+	@echo "  1) copy deploy/systemd/open_deep_research.env.example to /etc/open_deep_research/open_deep_research.env"
+	@echo "  2) edit /etc/open_deep_research/open_deep_research.env (fill in keys)"
+	@echo "  3) sudo cp deploy/systemd/open_deep_research.service /etc/systemd/system/"
+	@echo "  4) sudo systemctl daemon-reload && sudo systemctl enable --now open_deep_research"
+
 # ---- deploy (docker compose) ----------------------------------------------------
 
 .PHONY: docker-build

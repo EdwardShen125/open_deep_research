@@ -27,6 +27,8 @@ wheels/
 # Virtual environments
 venv/
 env/
+.venv/
+.venv-*/
 # Secrets (绝不入镜像 — 走 env / docker-compose env_file)
 .env
 deploy/.env
@@ -75,3 +77,4 @@ tests/expt_results/
 
 # Baseline / one-shot script outputs (P0 baseline_e2e.py etc.)
 artifacts/
+backups/

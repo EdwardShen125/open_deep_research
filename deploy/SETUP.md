@@ -184,3 +184,56 @@ make test                                              # 600+ passed in 60s
 | uvicorn 启动报 `tavily_python not installed` | `pip install tavily-python` 或跑 evidence-only 模式 |
 | Docker 镜像构建失败 | `Dockerfile.api` 安装 `uv` 步骤,可能需要换下载源 |
 | `migrate` 报 pgvector extension 找不到 | §5 |
+
+---
+
+## 10. 备份 / 还原 / systemd 常驻
+
+### 备份(每日 crontab 推荐)
+
+```bash
+make backup
+# 默认输出到 ./backups/<db>_<ts>.sql.gz
+# 自动保留 7 天
+```
+
+或者手工:`POSTGRES_PASSWORD=*** ./scripts/backup_pg.sh`。
+
+要挂 crontab:
+
+```cron
+# 每天凌晨 3 点备份
+0 3 * * * cd /opt/open_deep_research && ./scripts/backup_pg.sh >> /var/log/odr-backup.log 2>&1
+```
+
+### 还原
+
+```bash
+make restore                                  # 用 ./backups/ 最新文件
+# 或者
+./scripts/restore_pg.sh backups/odr_v2_20260723_120000.sql.gz
+```
+
+脚本会提示 `confirm DROP+RECREATE`(安全保护)。
+
+### systemd 常驻部署(host 跑 uvicorn,不用 docker)
+
+适合把 ODR 跑在没 docker 的旧服务器上:
+
+```bash
+sudo cp deploy/systemd/open_deep_research.env.example \
+    /etc/open_deep_research/open_deep_research.env
+sudo chmod 0600 /etc/open_deep_research/open_deep_research.env
+sudo vim /etc/open_deep_research/open_deep_research.env     # 填 keys
+sudo cp deploy/systemd/open_deep_research.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now open_deep_research
+sudo systemctl status open_deep_research
+sudo journalctl -u open_deep_research -f
+```
+
+或者走 `make install-systemd` 看步骤。
+
+服务监听 `0.0.0.0:2024`,再用 nginx / caddy 反向代理到 443(HTTPS)。
+
+
