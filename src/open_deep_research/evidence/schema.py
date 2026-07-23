@@ -57,7 +57,7 @@ class EvidenceUnitV2(BaseModel):
     )
 
     claim: str = Field(
-        max_length=300,
+        max_length=1000,  # 阶段 7 从 300 放宽:LLM 抽取的 claim 经常 300-800 字符;数据库 VARCHAR 无忧
         description="自足陈述句,不含指代,主语写全称",
     )
     claim_type: ClaimType
@@ -153,10 +153,26 @@ class EvidenceUnitV2(BaseModel):
 
         注意:UUID 列在 psycopg/SQLAlchemy 中通常会自动适配 str/UUID,
         这里统一转 str 以避免 asyncpg + 自定义类型踩坑。
+        非 UUID 字符串(如 pipeline 生成的 'r-20260723041051')用 uuid5
+        从字符串派生稳定 UUID,保证同一字符串总是同一 UUID。
         """
+        from uuid import UUID, uuid5, NAMESPACE_DNS
+
+        def _to_uuid(v):
+            if v is None:
+                return None
+            if isinstance(v, UUID):
+                return v
+            if isinstance(v, str):
+                try:
+                    return UUID(v)
+                except ValueError:
+                    return uuid5(NAMESPACE_DNS, v)
+            return None
+
         return {
-            "eu_id": str(self.eu_id),
-            "run_id": str(self.run_id),
+            "eu_id": _to_uuid(self.eu_id),
+            "run_id": _to_uuid(self.run_id),
             "dimension_id": self.dimension_id,
             "claim": self.claim,
             "claim_type": self.claim_type,

@@ -194,14 +194,27 @@ async def _run_pipeline_background(run_id: str, query: str, mode: str, max_subto
     try:
         # 延迟 import — 避免 unit test 拉全部
         from open_deep_research.plan_v2_pipeline import run_pipeline
+        from open_deep_research.search_providers import TavilyProvider, SearXNGProvider
+
+        # Primary: Tavily(若 mode=full 且 key 存在;否则 None 走 evidence-only)
+        primary = None
+        if mode == "full":
+            tavily_key = os.environ.get("TAVILY_API_KEY")
+            if tavily_key:
+                primary = TavilyProvider(api_key=tavily_key)
+
+        # Fallback: SearXNG(本地 docker 容器,free / no key)
+        # 注:Tavily 配额耗尽时 fallback 接管,即使 primary 失败也能产出 EU
+        searxng_url = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080")
+        fallback = SearXNGProvider(base_url=searxng_url, timeout=30.0)
 
         _ckpt("pipeline", "running")
 
         result = await run_pipeline(
             query=query,
             run_id=run_id,
-            primary=None,  # evidence-only 模式:无 Tavily
-            fallback=None,
+            primary=primary,
+            fallback=fallback,
             max_subtopics=max_subtopics,
         )
 
@@ -280,12 +293,17 @@ async def start_run(req: StartRunRequest, background_tasks: BackgroundTasks):
     """启动一个新 run(异步)。"""
     if req.mode not in ("evidence-only", "full"):
         raise HTTPException(400, f"mode must be 'evidence-only' or 'full', got {req.mode!r}")
-    if req.mode == "full" and not os.environ.get("TAVILY_API_KEY"):
-        raise HTTPException(
-            400,
-            "mode='full' requires TAVILY_API_KEY env var; "
-            "use mode='evidence-only' to run without network calls",
-        )
+    # mode='full' 允许跑当至少一种 search provider 可用:
+    #   - TAVILY_API_KEY 存在(走 Tavily primary)
+    #   - SEARXNG_URL 存在(走 SearXNG fallback — 即使 Tavily 配额耗尽也能跑)
+    # evidence-only 不调网络
+    if req.mode == "full":
+        if not os.environ.get("TAVILY_API_KEY") and not os.environ.get("SEARXNG_URL"):
+            raise HTTPException(
+                400,
+                "mode='full' requires TAVILY_API_KEY or SEARXNG_URL env var; "
+                "use mode='evidence-only' to run without network calls",
+            )
 
     rid = req.run_id or str(uuid4())
     try:

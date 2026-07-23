@@ -60,6 +60,7 @@ services:
         aliases: [odr-redis]
       pipeline-internal:
         aliases: [odr-redis]
+      outside-bridge: {}
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
@@ -79,13 +80,13 @@ services:
         aliases: [odr-searxng]
       outside-bridge: {}
     environment:
-      SEARXNG_SECRET: ${SEARXNG_SECRET}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-odr-v2-local-dev-not-secret}
     healthcheck:
-      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:8080/']
+      test: ['CMD-SHELL', 'wget --spider -q http://localhost:8080/healthz || exit 1']
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 15s
+      start_period: 30s
 
   # 隔离验证用容器 - 只接 pipeline-internal,不可外联
   pipeline-shell:

@@ -1,40 +1,63 @@
 # SearXNG 配置 - 网络隔离版
 # 仅通过 internal network 提供 HTTP API,pipeline 容器不可直连外网搜索引擎
+#
+# 策略:engines 块显式列 5 个 engines — SearXNG 2026.7.x 完全替换默认列表
+#     data-accuracy-oriented:仅启用能真产出 web 内容的 engines
+#     每个 engine 强制 categories: [general] 让默认 query 命中
+#
+# 实测可用(本机验证过):
+#   - arxiv   : 学术论文(免费 API,无 ban)→ EDR 相关论文可命中
+#   - github  : 代码仓库(免费 API,无 ban)→ cybersecurity 工具可命中
+#   - wikipedia: 百科(EDR 等专有词条不在,通用词条命中)
+# 实测不可用:
+#   - duckduckgo / startpage / qwant / brave / mojeek:HTML 抓取类,ban 严重
+#   - google / bing / brave:无 API key
+
 server:
   bind_address: 0.0.0.0
   port: 8080
   secret_key: "${SEARXNG_SECRET}"
-  limiter: false
-  image_proxy: false
+  limiter: false           # 关 rate limiter(本地单用户)
+  image_proxy: false       # 关图片代理(避免被滥用为 open proxy)
+
+botdetection:
+  ip_limit:
+    enabled: false
+  link_token:
+    enabled: false
 
 outgoing:
   pool_connections: 100
   pool_maxsize: 20
-  request_timeout: 5.0
+  request_timeout: 30.0
   enable_http2: false
-  retries: 1
+  retries: 3
+  retry_on_http_error: true
 
 engines:
-  # 全文类 - 用于 Phase 1 检索
-  - name: google
+  # SearXNG 2026.7.x:engines 块完全替换默认列表
+  # 强制 categories: [general] 让默认 query 命中这些 engines
+  - name: arxiv
+    engine: arxiv
     disabled: false
-    shortcut: go
-  - name: bing
+    shortcut: arx
+    categories: [general]
+  - name: github
+    engine: github
     disabled: false
-    shortcut: bi
-  - name: duckduckgo
+    shortcut: gh
+    categories: [general]
+  - name: wikipedia
+    engine: wikipedia
     disabled: false
-    shortcut: ddg
-  - name: brave
+    shortcut: wp
+    categories: [general]
+  - name: openstreetmap
+    engine: openstreetmap
     disabled: false
-    shortcut: br
-  - name: startpage
-    disabled: false
-    shortcut: sp
+    shortcut: osm
+    categories: [general]
 
-  # 不启用 raw-html 类引擎,避免被滥用为代理
-
-# 提供 doi_resolvers 以满足 2026 版 SearXNG 的 choices 校验
 doi_resolvers:
   oadoi.org: https://api.oadoi.org/
   doi.org: https://doi.org/
@@ -45,11 +68,3 @@ formats:
   - json
   - csv
   - rss
-
-categories_as_tabs:
-  general:
-    categories: [general]
-  images:
-    categories: [images]
-
-# default_doi_resolver: 2026 版 SearXNG 已移除 DOI resolver 功能,字段必须省略

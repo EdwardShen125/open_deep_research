@@ -422,8 +422,16 @@ class EvidenceUnit:
         source_tier: SourceTier = "tertiary"
 
         # run_id 转换:str → UUID(str)
-        from uuid import UUID as _UUID
-        rid = _UUID(run_id) if not isinstance(run_id, _UUID) else run_id
+        from uuid import UUID as _UUID, uuid5, NAMESPACE_DNS
+        # 非 UUID 字符串(如 'r-20260723041315')用 uuid5 派生稳定 UUID,
+        # 让 Pydantic EvidenceUnitV2.run_id: UUID 字段校验通过。
+        if isinstance(run_id, _UUID):
+            rid = run_id
+        else:
+            try:
+                rid = _UUID(run_id)
+            except (ValueError, TypeError, AttributeError):
+                rid = uuid5(NAMESPACE_DNS, str(run_id))
 
         return EvidenceUnitV2(
             run_id=rid,

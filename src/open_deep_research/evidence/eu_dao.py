@@ -18,7 +18,7 @@ import os
 from datetime import date, datetime, timezone
 from typing import Any, Iterable, Optional
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid5, NAMESPACE_DNS
 
 from open_deep_research.evidence.schema import ClaimV2, EvidenceUnitV2, Grade
 
@@ -47,7 +47,12 @@ def _coerce_uuid(v: Any) -> Optional[UUID]:
         try:
             return UUID(v)
         except ValueError:
-            return None
+            # 非 UUID 字符串(如 pipeline 生成的 'r-20260723041051'):
+            # 用 uuid5 从字符串派生稳定 UUID,保证同一字符串总是同一 UUID
+            try:
+                return uuid5(NAMESPACE_DNS, v)
+            except Exception:
+                return None
     return None
 
 
@@ -226,7 +231,9 @@ class EuDAO:
         `only_usable` 为 True 时只返回通过闸的 EU(span_verified && !numeric_drift
         && entailment_verdict in (entailed, partial))。
         """
-        rid = str(run_id)
+        rid = _coerce_uuid(run_id)
+        if rid is None:
+            return []
         sql = "SELECT * FROM evidence.evidence_unit WHERE run_id = %s"
         params: list[Any] = [rid]
         if dimension_id is not None:
@@ -244,7 +251,9 @@ class EuDAO:
         return [_row_to_eu(cur.description, r) for r in cur.fetchall()]
 
     def count_by_run(self, run_id: str | UUID) -> int:
-        rid = str(run_id)
+        rid = _coerce_uuid(run_id)
+        if rid is None:
+            return 0
         cur = self._cur()
         cur.execute(
             "SELECT count(*) FROM evidence.evidence_unit WHERE run_id = %s",
