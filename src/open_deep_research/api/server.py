@@ -161,6 +161,37 @@ class StartRunResponse(BaseModel):
     started_at: str
 
 
+class ResumeRunRequest(BaseModel):
+    """POST /runs/{run_id}/resume 的请求体。
+
+    query / mode / max_subtopics 都可以省略 — 默认从 registry 拿。
+    """
+    query: Optional[str] = Field(default=None, description="可选 — 默认从 registry 拿")
+    mode: Optional[str] = Field(
+        default=None,
+        description="可选 — 默认从 registry 拿 (evidence-only | full)",
+    )
+    max_subtopics: Optional[int] = Field(default=None, ge=1, le=10)
+
+
+class ResumeRunResponse(BaseModel):
+    """POST /runs/{run_id}/resume 的响应体。
+
+    包含跳过的 stage 列表(让客户端知道哪些阶段已 done 哪些需要重跑)。
+    """
+    run_id: str
+    status: str  # queued / running / resumed
+    skipped_stages: list[str] = Field(
+        default_factory=list,
+        description="续跑时跳过的 stage 名列表(已 mark_done 的)",
+    )
+    resumed_stages: list[str] = Field(
+        default_factory=list,
+        description="续跑时实际跑的 stage 名列表(从 checkpoint 角度看)",
+    )
+    started_at: str
+
+
 class StageProgress(BaseModel):
     name: str
     status: str  # pending / running / done / failed
@@ -224,8 +255,8 @@ async def _run_pipeline_background(run_id: str, query: str, mode: str, max_subto
 
     _ckpt("api_received", "done", {"query": query, "mode": mode})
 
-    from open_deep_research.plan_v2_pipeline import run_pipeline
     from open_deep_research.search_providers import TavilyProvider, SearXNGProvider
+    from open_deep_research.staged_runner import run_pipeline_resumable
 
     primary = None
     if mode == "full":
@@ -237,7 +268,7 @@ async def _run_pipeline_background(run_id: str, query: str, mode: str, max_subto
 
     _ckpt("pipeline", "running")
     try:
-        result = await run_pipeline(
+        result = await run_pipeline_resumable(
             query=query,
             run_id=run_id,
             primary=primary,
@@ -282,6 +313,91 @@ async def _run_pipeline_background(run_id: str, query: str, mode: str, max_subto
         )
 
 
+async def _run_pipeline_resume_background(
+    run_id: str, query: str, mode: str, max_subtopics: int,
+) -> None:
+    """后台任务:续跑 run(同 run_id,从 checkpoint 跳过已完成 stage)。
+
+    设计:
+    - 用 staged_runner.run_pipeline_resumable 代替 plan_v2_pipeline.run_pipeline
+    - 失败不 raise — 写 registry + Failure record
+    - 不阻塞主进程(BackgroundTasks 在请求返回后跑)
+    - 区别 _run_pipeline_background:这个函数用于 /resume 端点,不会重置 registry
+    """
+    started = datetime.now(timezone.utc)
+    _update_run(run_id, status="running", finished_at=None, error=None)
+
+    def _ckpt(stage: str, status: str, payload: Optional[dict] = None) -> None:
+        try:
+            with RunCheckpointDAO() as rdao:
+                rdao.upsert(run_id=run_id, stage=stage, status=status, payload=payload or {})
+        except Exception as e:
+            logger.warning("checkpoint upsert failed (%s/%s): %s", stage, status, e)
+
+    _ckpt("api_resume", "done", {"query": query, "mode": mode})
+
+    from open_deep_research.search_providers import TavilyProvider, SearXNGProvider
+    from open_deep_research.staged_runner import run_pipeline_resumable
+
+    primary = None
+    if mode == "full":
+        tavily_key = os.environ.get("TAVILY_API_KEY")
+        if tavily_key:
+            primary = TavilyProvider(api_key=tavily_key)
+    searxng_url = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080")
+    fallback = SearXNGProvider(base_url=searxng_url, timeout=30.0)
+
+    _ckpt("pipeline", "running")
+    try:
+        result = await run_pipeline_resumable(
+            query=query,
+            run_id=run_id,
+            primary=primary,
+            fallback=fallback,
+            max_subtopics=max_subtopics,
+        )
+
+        _ckpt(
+            "pipeline", "done",
+            {
+                "passed": getattr(result, "passed", None),
+                "n_eus": len(result.evidence_units or []),
+                "has_report": result.cited_report is not None,
+                "warnings": list(result.cited_report_warnings or []),
+                "resumed": True,
+            },
+        )
+
+        _update_run(
+            run_id,
+            status="completed",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            result_summary={
+                "passed": getattr(result, "passed", None),
+                "n_eus": len(result.evidence_units or []),
+                "has_report": result.cited_report is not None,
+                "resumed": True,
+            },
+        )
+        logger.info(
+            "RESUMED run %s completed in %.1fs (passed=%s, n_eus=%d)",
+            run_id,
+            (datetime.now(timezone.utc) - started).total_seconds(),
+            getattr(result, "passed", None),
+            len(result.evidence_units or []),
+        )
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        logger.error("resumed run %s failed: %s\n%s", run_id, err, traceback.format_exc())
+        _ckpt("pipeline", "failed", {"error": err})
+        _update_run(
+            run_id,
+            status="failed",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            error=err,
+        )
+
+
 # =============================================================================
 # Endpoints
 # =============================================================================
@@ -291,7 +407,10 @@ async def root():
     return {
         "service": "open_deep_research_api",
         "version": "0.1.0",
-        "endpoints": ["/runs", "/runs/{id}", "/runs/{id}/report", "/healthz", "/docs"],
+        "endpoints": [
+            "/runs", "/runs/{id}", "/runs/{id}/resume", "/runs/{id}/report",
+            "/healthz", "/docs",
+        ],
     }
 
 
@@ -350,6 +469,119 @@ async def start_run(req: StartRunRequest, background_tasks: BackgroundTasks):
         query=req.query,
         mode=req.mode,
         started_at=_RUN_REGISTRY[rid]["started_at"],
+    )
+
+
+@app.post(
+    "/runs/{run_id}/resume",
+    response_model=ResumeRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resume_run(
+    run_id: str,
+    req: ResumeRunRequest,
+    background_tasks: BackgroundTasks,
+):
+    """续跑一个已存在的 run(断点续跑)。
+
+    工作原理:
+    - 通过 list_completed_stages(run_id) 查 checkpoint
+    - 把"已完成 stage 列表"返回给客户端(让 client 知道从哪继续)
+    - BackgroundTasks 调 run_pipeline_resumable,ResearchJob 自动跳过已 done stage
+    - 如果 registry 找不到 run_id:返回 404
+    - 如果 run 还在 running:返回 409 (不能 resume running run)
+    - 如果 run 已 completed 且 5 stage 全 done:仍接受,会全部 skip + 返回 rehydrate 结果
+
+    限制:目前 staged_runner 的 5 stage 边界对齐到整 pipeline(不是 sub-phase),
+    续跑粒度 = 整 pipeline。但 EU/claim 落 PG 时 upsert 幂等,不会创建重复。
+    """
+    try:
+        UUID(run_id)
+    except ValueError:
+        raise HTTPException(400, f"run_id must be a valid UUID, got {run_id!r}")
+
+    meta = _RUN_REGISTRY.get(run_id)
+    if not meta:
+        # server 重启后 registry 是空的 — 从 PG checkpoint + EU/claim 重新装配 meta
+        # 这样 /resume 仍然可用(断点续跑的核心场景)
+        from open_deep_research.evidence import (
+            EuDAO, ClaimDAO, list_completed_stages as _list_done_resume,
+        )
+        skipped_recovered: list[str] = []
+        try:
+            skipped_recovered = _list_done_resume(
+                run_id,
+                stage_names=["setup", "extract", "verify", "merge", "write"],
+            )
+        except Exception:
+            pass
+
+        if not skipped_recovered:
+            # PG 端无 checkpoint — 真不知道 query,只能返回 404
+            raise HTTPException(
+                404,
+                f"run_id {run_id!r} not found in registry AND no checkpoint in PG",
+            )
+
+        # 从 EU + claim 表拼一个 placeholder meta(让 /resume 能继续)
+        try:
+            with EuDAO() as edao:
+                total_eus = edao.count_by_run(run_id)
+            with ClaimDAO() as cdao:
+                total_claims = len(cdao.list_by_run(run_id))
+        except Exception as e:
+            logger.warning("PG fallback meta build for %s failed: %s", run_id, e)
+            total_eus = 0
+            total_claims = 0
+
+        placeholder_query = f"(recovered from PG: run_id={run_id})"
+        _register_run(run_id, query=placeholder_query, mode="evidence-only")
+        meta = _RUN_REGISTRY[run_id]
+        logger.info(
+            "[resume] server restart fallback: run_id=%s recovered from PG "
+            "(%d stages done, %d EU, %d claims)",
+            run_id, len(skipped_recovered), total_eus, total_claims,
+        )
+
+    cur_status = meta.get("status", "")
+    if cur_status == "running":
+        raise HTTPException(409, f"run {run_id!r} is already running; cancel it first")
+
+    # 用 registry 的 query/mode,request 里没传才用 registry
+    query = req.query if req.query is not None else meta["query"]
+    mode = req.mode if req.mode is not None else meta["mode"]
+    if mode not in ("evidence-only", "full"):
+        raise HTTPException(400, f"mode must be 'evidence-only' or 'full', got {mode!r}")
+    max_subtopics = req.max_subtopics if req.max_subtopics is not None else 4
+
+    # 读 checkpoint:列出已 done 的 stage(用作 response 里 skipped_stages)
+    skipped: list[str] = []
+    try:
+        from open_deep_research.evidence import (
+            list_completed_stages as _list_done,
+        )
+        skipped = _list_done(
+            run_id,
+            stage_names=["setup", "extract", "verify", "merge", "write"],
+        )
+    except Exception as e:
+        logger.warning("read checkpoint for resume %s failed: %s", run_id, e)
+
+    # resumed_stages = 还没 done 的 stage
+    all_stages = ["setup", "extract", "verify", "merge", "write"]
+    resumed = [s for s in all_stages if s not in skipped]
+
+    _update_run(run_id, status="queued", error=None)
+    background_tasks.add_task(
+        _run_pipeline_resume_background, run_id, query, mode, max_subtopics,
+    )
+
+    return ResumeRunResponse(
+        run_id=run_id,
+        status="resumed",
+        skipped_stages=skipped,
+        resumed_stages=resumed,
+        started_at=_RUN_REGISTRY[run_id]["started_at"],
     )
 
 
