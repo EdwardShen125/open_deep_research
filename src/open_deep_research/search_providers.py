@@ -33,11 +33,15 @@ Each `SearchResult` is a typed dict mapped onto Phase 1.1
 
 from __future__ import annotations
 
+import logging
+
 import asyncio
 import os
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable, Optional, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 from open_deep_research.search_cache import SearchCache
 from open_deep_research.sources_dao import SourcesDAO, SourceRecord
@@ -309,9 +313,10 @@ class UnifiedSearch:
         if self.primary is not None:
             try:
                 results = await self.primary.search(query)
-            except Exception:
+            except Exception as e:
                 primary_failed = True
                 resp.failed_providers.append(self.primary.name)
+                logger.warning("primary=%s failed: %s", self.primary.name, e)
             else:
                 if results:
                     resp.results = results
@@ -319,13 +324,13 @@ class UnifiedSearch:
                     resp.source = self.primary.name
 
         # ---- 3. fallback ----
-        if not resp.results and self.fallback is not None and (
-            primary_failed or self.primary is not None
-        ):
+        # 当 primary 没给出结果 / 没 primary / primary 失败时,fallback 接管
+        if not resp.results and self.fallback is not None:
             try:
                 results = await self.fallback.search(query)
-            except Exception:
+            except Exception as e:
                 resp.failed_providers.append(self.fallback.name)
+                logger.warning("fallback=%s failed: %s", self.fallback.name, e)
             else:
                 if results:
                     resp.results = results

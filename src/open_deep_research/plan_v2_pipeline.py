@@ -28,10 +28,13 @@ entire plan_v2 stack.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from open_deep_research.planner_v2 import (
     PlannerPlan, plan_from_brief, validate_plan,
@@ -179,6 +182,7 @@ async def run_pipeline(
                     research_topic=st.title,
                 ))
             except Exception as e:
+                logger.warning("search failed for sub_topic=%s: %s", st.title, e)
                 out.search_responses.append({
                     "sub_topic": st.title,
                     "error": str(e),
@@ -213,6 +217,8 @@ async def run_pipeline(
             )
             all_eus.extend(eus)
         out.evidence_units = dedup_eus(all_eus)
+        logger.info("extracted %d unique EU across %d sub-topics",
+                    len(out.evidence_units), len(plan.sub_topics))
 
         if not out.evidence_units:
             out.error = "no evidence units extracted"
