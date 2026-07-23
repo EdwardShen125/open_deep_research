@@ -44,6 +44,7 @@ from open_deep_research.search_providers import (
 )
 from open_deep_research.search_cache import SearchCache
 from open_deep_research.sources_dao import SourcesDAO
+from open_deep_research.evidence.embedder import embed_texts
 from open_deep_research.eu_extractor import (
     extract_from_search_results,
 )
@@ -256,6 +257,25 @@ async def run_pipeline(
         try:
             v2_eus = [eu.to_v2(run_id=rid) for eu in out.evidence_units]
             if v2_eus:
+                # Runbook P0:真集成验证 — 在 upsert_many 前 batch hook
+                # embed_texts() 写 v2_eus[i].embedding (BGE-M3 真模型优先,
+                # 未装时 SHA-256 fallback — 永远不抛异常,只返回 (N, 1024) 向量)。
+                # 失败 → 留 None,PG 端 embedding 列 NULL,与历史数据兼容。
+                try:
+                    claims = [vu.claim for vu in v2_eus]
+                    vecs = embed_texts(claims)
+                    if vecs.shape[0] == len(v2_eus):
+                        for vu, v in zip(v2_eus, vecs):
+                            vu.embedding = v.tolist()
+                except Exception as emb_e:
+                    import warnings
+                    warnings.warn(
+                        f"Phase 3 embedder.embed_texts failed (run_id={rid}): "
+                        f"{emb_e}; EU embedding will be NULL",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+
                 with EuDAO() as dao:
                     dao.upsert_many(v2_eus)
         except Exception as pg_e:
