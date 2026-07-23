@@ -1,10 +1,4 @@
-# =============================================================================
-# Open Deep Research — API image
-# Multi-purpose: uvicorn API + LangGraph dev server + pipeline one-shot.
-# Build context is repo root:  docker build -f Dockerfile.api -t odr-api:latest .
-# =============================================================================
-
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.4
 FROM python:3.13-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -12,46 +6,36 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     UV_LINK_MODE=copy \
-    UV_PROJECT_ENVIRONMENT=/app/.venv
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_NO_DEV=1
 
-# 系统依赖:crawl4ai 需要 chromium / firefox hooks; psycopg3 不需要 libpq-dev
-#   - libxml2/libxslt: lxml 已有 wheels,但 crawl4ai 在某些路径用得到
-#   - tini: PID 1 信号转发
+# tini = PID 1 signal handling, libxml2/libxslt1 = lxml wheels
 RUN apt-get update && apt-get install --no-install-recommends -y \
-        tini \
-        ca-certificates \
-        curl \
-        libxml2 \
-        libxslt1.1 \
+        tini ca-certificates curl libxml2 libxslt1.1 \
     && rm -rf /var/lib/apt/lists/*
 
-# uv — fast Python package installer (matches repo lockfile uv.lock)
+# uv (fast package manager, matches repo lockfile uv.lock)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 
-# 1) 依赖层缓存:只 copy lockfile,装完才 copy src,加速 rebuild
+# Layer 1: deps only — cache-friendly, no source yet.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-install-project --no-extra ml
 
-# 2) 源码层
+# Layer 2: copy source + project install (setuptools build, no dev, no ml).
 COPY src ./src
 COPY langgraph.json pyproject.toml uv.lock README.md LICENSE ./
+COPY deploy/docker-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-extra ml
 
-# 入口脚本 — 既能 uvicorn 也能 langgraph dev
-COPY deploy/docker-entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# 默认 port (可被 PORT env 覆盖)
-ENV PORT=2024 \
-    HOST=0.0.0.0 \
-    PYTHONPATH=/app/src
-
+ENV PORT=2024 HOST=0.0.0.0 PYTHONPATH=/app/src
 EXPOSE 2024 8088
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
