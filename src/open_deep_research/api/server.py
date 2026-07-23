@@ -353,7 +353,10 @@ async def get_run_status(run_id: str):
         with ClaimDAO() as cdao:
             claims = cdao.list_by_run(run_id)
         if claims:
-            stats = ClaimStats.from_claim_list(claims)
+            # 同时拉 EU,让 ClaimStats 计算 total_eus / unique_sources
+            with EuDAO() as edao:
+                eus = edao.list_by_run(run_id)
+            stats = ClaimStats.from_claim_list(claims, eus=eus)
             claim_stats = stats.model_dump()
     except Exception as e:
         logger.warning("claim_stats for %s failed: %s", run_id, e)

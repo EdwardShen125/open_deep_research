@@ -64,6 +64,8 @@ from open_deep_research.report_data import (
 from open_deep_research.crawler import (
     MockCrawlProvider, CrawlResolver, CrawlResponse,
 )
+from open_deep_research.evidence import EuDAO, ClaimDAO
+from open_deep_research.evidence.pipeline import build_claims_from_eus
 
 
 # =============================================================================
@@ -85,6 +87,8 @@ class PlanV2RunResult:
     planner: Optional[PlannerPlan] = None
     search_responses: list[dict[str, Any]] = field(default_factory=list)  # per sub-topic
     evidence_units: list[EvidenceUnit] = field(default_factory=list)
+    claims: list[Any] = field(default_factory=list)  # ClaimV2 (跨源归并)
+    claim_grade_dist: dict[str, int] = field(default_factory=dict)  # {A: N, B: N, C: N, D: N}
     cited_report: Optional[CitedReport] = None
     cited_report_warnings: list[str] = field(default_factory=list)
     verification: Optional[VerificationResult] = None
@@ -103,6 +107,8 @@ class PlanV2RunResult:
             "planner": self.planner.to_dict() if self.planner else None,
             "search_responses": self.search_responses,
             "evidence_units": eus_as_dicts(self.evidence_units),
+            "claims": [c.model_dump() if hasattr(c, "model_dump") else c for c in self.claims],
+            "claim_grade_dist": self.claim_grade_dist,
             "cited_report": self.cited_report.to_dict() if self.cited_report else None,
             "cited_report_warnings": self.cited_report_warnings,
             "verification": self.verification.to_dict() if self.verification else None,
@@ -244,8 +250,8 @@ async def run_pipeline(
         # ----- 3.5 Phase 3 (= Runbook v1 阶段 1.3): 同步落 PG -----
         # 把确定性抽取的 EU 写 PG evidence.evidence_unit 表,作为"一等公民"。
         # 失败则 fail-safe(pipeline 仍返回 in-memory 结果)。
+        v2_eus: list = []  # 同时给下面的 merge phase 用
         try:
-            from open_deep_research.evidence import EuDAO
             v2_eus = [eu.to_v2(run_id=rid) for eu in out.evidence_units]
             if v2_eus:
                 with EuDAO() as dao:
@@ -255,6 +261,39 @@ async def run_pipeline(
             warnings.warn(
                 f"Phase 3 EuDAO.upsert_many failed (run_id={rid}): {pg_e}; "
                 "falling back to in-memory EU only",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        # ----- 3.6 Phase 5 (= Runbook v1 阶段 3.1-3.4): EU → ClaimV2 -----
+        # 数据准确性导向 (Runbook v1 §3.3):
+        #   1. upgrade_source_tier — 基于白名单再次校验 source_tier
+        #   2. merge_units — cosine similarity > 0.92 的 EU 归并
+        #   3. build_claim_drafts — 每个 group 生成 canonical claim
+        #   4. grade_claim — A/B/C/D 评级 (基于 independent + primary count)
+        #   5. claim 落 PG (evidence.claim 表) — 让 /runs/{id} 的 claim_stats 立刻可观测
+        try:
+            if v2_eus:
+                claims = build_claims_from_eus(v2_eus)
+                out.claims = claims
+                out.claim_grade_dist = {
+                    g: sum(1 for c in claims if c.grade == g)
+                    for g in "ABCD"
+                }
+                logger.info(
+                    "build_claims_from_eus: %d EU -> %d claims (grade dist: %s)",
+                    len(v2_eus), len(claims), out.claim_grade_dist,
+                )
+                if claims:
+                    with ClaimDAO() as cdao:
+                        cdao.upsert_many(claims)
+                    # Phase 3.4: 回填 EU.claim_id — 用 claim 中所含 entities
+                    # 反查 EU.content_hash 不可靠,留 P1 单独做 (Runbook §3.4 完整版)。
+        except Exception as merge_e:
+            import warnings
+            warnings.warn(
+                f"Phase 5 build_claims_from_eus failed (run_id={rid}): {merge_e}; "
+                "falling back to in-memory claims only",
                 RuntimeWarning,
                 stacklevel=2,
             )
