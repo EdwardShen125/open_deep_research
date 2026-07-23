@@ -156,11 +156,13 @@ def _question_for(clause: str) -> str:
 # =============================================================================
 
 DIMENSION_TEMPLATES: dict[str, str] = {
-    "market_size":  "market size, revenue, CAGR, forecast, and growth rate of: {brief}",
-    "adoption":     "adoption rate, user base, deployment share, and customer count of: {brief}",
-    "regulation":   "regulation, compliance, standards, policy, and legal framework for: {brief}",
-    "performance":  "performance benchmarks, technical capabilities, and comparison of: {brief}",
-    "ethics":       "ethics, bias, privacy concerns, and societal impact of: {brief}",
+    # D: short, ASCII-only, ≤8 words. SearXNG + arxiv reject queries with
+    # em-dash / colon / parens, and prefer brief-first + dimension-keyword.
+    "market_size":  "{brief} market size forecast revenue",
+    "adoption":     "{brief} adoption rate customer base",
+    "regulation":   "{brief} regulation compliance policy",
+    "performance":  "{brief} performance benchmarks comparison",
+    "ethics":       "{brief} ethics bias privacy",
 }
 
 DIMENSION_ORDER: list[str] = ["market_size", "adoption", "regulation", "performance", "ethics"]
@@ -220,7 +222,7 @@ def plan_from_brief(
             dep_ids = [s.id for s in sub_topics if s.id is not None]
             sub_topics.append(SubTopic(
                 title="context",
-                question=f"What is the context of: {clauses[0]}",
+                question=clauses[0],  # D: short verbatim query (no "context of:" wrapper)
                 depends_on=dep_ids,
                 search_api="searxng",
                 parallelism="serial",
@@ -236,7 +238,7 @@ def plan_from_brief(
             clauses = [brief or "(empty brief)"]
         first = SubTopic(
             title="context",
-            question=f"What is the context of: {clauses[0]}",
+            question=clauses[0],  # D: short verbatim query (clauses mode fallback)
             depends_on=[],
             search_api="tavily",
             parallelism="fan_out",

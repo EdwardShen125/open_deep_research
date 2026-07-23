@@ -37,6 +37,7 @@ import logging
 
 import asyncio
 import os
+import re
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable, Optional, Protocol, runtime_checkable
@@ -45,6 +46,51 @@ logger = logging.getLogger(__name__)
 
 from open_deep_research.search_cache import SearchCache
 from open_deep_research.sources_dao import SourcesDAO, SourceRecord
+
+
+# =============================================================================
+# Query sanitization (F: bottom-layer insurance for ALL providers)
+# =============================================================================
+# SearXNG forwards query directly to upstream HTTP endpoints (arxiv.org etc.)
+# which reject: em-dash (U+2014), colon (`:`), unicode quotes, parens, etc.
+# Tavily tolerates more, but stripping still helps. We replace unicode
+# punctuation with ASCII equivalents, collapse whitespace, truncate to ≤120
+# chars. Pure-ASCII queries round-trip unchanged. Defensive fallback returns
+# the original query if sanitization yields empty.
+_MAX_QUERY_LEN = 120
+_UNICODE_PUNCT_MAP = {
+    "\u2014": "-",  # em dash —
+    "\u2013": "-",  # en dash –
+    "\u2018": "'",  # left single quote '
+    "\u2019": "'",  # right single quote '
+    "\u201C": '"',  # left double quote "
+    "\u201D": '"',  # right double quote "
+    "\u00B7": ".",  # middle dot ·
+    "\u2026": "...",  # ellipsis …
+    "\u00A0": " ",  # non-breaking space
+}
+
+
+def _sanitize_query(q: str) -> str:
+    """Strip unicode punctuation + collapse whitespace + truncate to ≤120 chars.
+
+    Pure-ASCII queries round-trip unchanged (length permitting). Defensive
+    fallback returns the original query if sanitization yields empty.
+    """
+    if not q:
+        return q
+    out = q
+    for src, dst in _UNICODE_PUNCT_MAP.items():
+        out = out.replace(src, dst)
+    # Drop remaining punctuation that arxiv/SearXNG choke on: `:`, `(`, `)`,
+    # `[`, `]`, `{`, `}`, `\`, `/`. Keep `-`, `_`, `.`, `'`, `,`, `?`, `!`.
+    out = re.sub(r"[:\(\)\[\]\{\}\\/]", " ", out)
+    # Collapse whitespace runs.
+    out = re.sub(r"\s+", " ", out).strip()
+    # Truncate to ≤120 chars (arxiv sweet spot).
+    if len(out) > _MAX_QUERY_LEN:
+        out = out[:_MAX_QUERY_LEN].rstrip()
+    return out or q
 
 
 # =============================================================================
@@ -294,6 +340,11 @@ class UnifiedSearch:
         self._clock = clock or time.monotonic
 
     async def search(self, query: SearchQuery) -> SearchResponse:
+        # F: Sanitize queries at the entry point — strip unicode punctuation,
+        # collapse whitespace, truncate to ≤120 chars. Protects all providers
+        # (Tavily / SearXNG / future) from upstream rejects on em-dash / colon /
+        # quotes / parentheses. Original semantics preserved for ASCII queries.
+        query.queries = [_sanitize_query(q) for q in query.queries]
         started = self._clock()
         resp = SearchResponse(results=[], source="")
 
