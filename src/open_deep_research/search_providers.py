@@ -120,6 +120,12 @@ class SearchResult:
     provider: str = ""                  # 'tavily' / 'searxng'
     provider_query: Optional[str] = None
     http_status: Optional[int] = None
+    # Phase query_constructor: per-result backend name from SearXNG
+    # (e.g. 'bing', 'arxiv'). Reflected from SearchResult.raw_payload['engine']
+    # at construction time; None for Tavily (which has no per-result
+    # backend concept). Useful for source-tier analytics and for debugging
+    # query_constructor's filter profiles in production.
+    engine: Optional[str] = None
     raw_payload: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -141,6 +147,9 @@ class SearchResult:
     @classmethod
     def from_searxng(cls, raw: dict, query: str) -> "SearchResult":
         # SearXNG returns slightly different field names; normalize.
+        # Also capture `engine` so downstream knows which backend returned
+        # this hit (SearXNG per-result metadata ships it). None when absent
+        # (older SearXNG versions).
         return cls(
             url=raw.get("url", ""),
             title=raw.get("title"),
@@ -149,6 +158,7 @@ class SearchResult:
             score=raw.get("score"),
             provider="searxng",
             provider_query=query,
+            engine=raw.get("engine"),         # None when absent — backward compat
             raw_payload=raw,
         )
 
@@ -269,23 +279,70 @@ class SearXNGProvider:
     async def search(self, query: SearchQuery) -> list[SearchResult]:
         fetcher = self._fetcher or self._default_fetcher
         results: list[SearchResult] = []
+        # Phase query_constructor: query.extras now drives SearXNG-side
+        # filtering. Forwarded SearXNG parameters (when present in extras):
+        #   engines   → ?engines=bing,arxiv
+        #   categories→ ?categories=general,news
+        #   language  → ?language=zh-CN  (overrides the historical 'auto')
+        #   time_range→ ?time_range=year
+        # Forward-compat note: all four are *optional* — when absent we
+        # issue the exact same 4-param URL as pre-query_constructor. This
+        # means an extras={} SearchQuery is byte-equivalent to the legacy
+        # baseline (verified by the test suite).
+        extras = query.extras or {}
+        _DEBUG_SEARXNG = bool(os.environ.get("OPEN_DEEP_RESEARCH_DEBUG_SEARXNG"))
         for q in query.queries:
-            params = {
+            params: dict[str, Any] = {
                 "q": q,
                 "format": "json",
                 "language": "auto",
                 "safesearch": 0,
             }
+            # Surface extras → URL params, only when non-empty.
+            engines = extras.get("engines")
+            if engines:
+                params["engines"] = ",".join(engines)
+            categories = extras.get("categories")
+            if categories:
+                params["categories"] = ",".join(categories)
+            lang = extras.get("language")
+            if lang:
+                # `extras={"language": "zh-CN"}` overrides the default
+                # 'auto' so callers can lock locale (used by query_constructor
+                # for Chinese EDR briefs etc.).
+                params["language"] = lang
+            time_range = extras.get("time_range")
+            if time_range:
+                params["time_range"] = time_range
             try:
+                if _DEBUG_SEARXNG:
+                    logger.info("[SEARXNG] url=%s/search params_keys=%s timeout=%s",
+                                self._base_url, sorted(params.keys()), self._timeout)
                 resp = await fetcher(self._base_url + "/search", params, self._timeout)
-            except Exception:
+                if _DEBUG_SEARXNG:
+                    n = len((resp or {}).get("results", []) or [])
+                    logger.info("[SEARXNG] returned %d results", n)
+            except Exception as e:
+                if _DEBUG_SEARXNG:
+                    logger.warning("[SEARXNG] fetcher raised: %s: %s", type(e).__name__, e)
+                else:
+                    logger.warning("SearXNGProvider fetcher failed (%s): %s", type(e).__name__, e)
                 continue
             for raw in resp.get("results", []) or []:
                 results.append(SearchResult.from_searxng(raw, q))
         return results
 
     async def _default_fetcher(self, url: str, params: dict, timeout: float) -> dict:
-        """Use urllib in a thread — keeps the dependency surface tiny."""
+        """Use urllib in a thread — keeps the dependency surface tiny.
+
+        NOTE: this fetcher is a **pre-existing** implementation, not part
+        of the query_constructor change. Kept intact here so this commit
+        doesn't accidentally fix or break the server-context 0-EU
+        behaviour. A follow-up can swap to ``asyncio.to_thread`` if the
+        FastAPI BackgroundTasks / ``asyncio.get_event_loop()`` ambiguity
+        surfaces again. See ``tests/test_query_constructor.py`` for the
+        end-to-end verification path that DID succeed (unit + standalone).
+        """
         import urllib.parse
         import urllib.request
         full = url + "?" + urllib.parse.urlencode(params)
@@ -465,5 +522,6 @@ def _dict_to_result(d: dict) -> SearchResult:
         provider=d.get("provider", ""),
         provider_query=d.get("provider_query"),
         http_status=d.get("http_status"),
+        engine=d.get("engine"),
         raw_payload=d.get("raw_payload", {}) or {},
     )

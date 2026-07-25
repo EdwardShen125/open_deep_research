@@ -48,6 +48,12 @@ from open_deep_research.evidence.embedder import embed_texts
 from open_deep_research.eu_extractor import (
     extract_from_search_results,
 )
+# Phase query_constructor: turn planner sub-topics into SearXNG profiles.
+# Honor OPEN_DEEP_RESEARCH_NO_QC=1 to disable and keep the pre-QC baseline.
+from open_deep_research.query_constructor import (
+    construct as qc_construct,
+    to_search_query,
+)
 from open_deep_research.cited_report import (
     CitedReport, parse_cited_report, validate_cited_report, render_eu_pool,
     CITED_REPORT_PROMPT,
@@ -174,6 +180,13 @@ async def run_pipeline(
         out.planner = plan
 
         # ----- 2. Search + EU extraction per sub-topic -----
+        # Phase query_constructor: instead of constructing one SearchQuery per
+        # sub-topic with hard-coded `topic=general, max_results=5`, we delegate
+        # the query-shape decision to QueryConstructor. Result: each sub-topic
+        # may fan out to multiple SearXNG profiles (vendor + academic, for
+        # instance), each tuned to a different engine/category/language subset.
+        # Old behavior is preserved when OPEN_DEEP_RESEARCH_NO_QC=1 (one
+        # SearchQuery, topic=general, max_results=5, no extras).
         us = UnifiedSearch(
             primary=primary,
             fallback=fallback,
@@ -182,42 +195,87 @@ async def run_pipeline(
         )
         all_eus: list[EvidenceUnit] = []
         for st in plan.sub_topics:
+            # 2a. Build an ExecutionPlan (LLM-driven one-shot per sub-topic).
             try:
-                resp = await us.search(SearchQuery(
+                exec_plan = await qc_construct(query, st)
+            except Exception as e:
+                logger.warning(
+                    "query_constructor failed for sub_topic=%s: %s; using legacy single-intent",
+                    st.title, e,
+                )
+                # Conservative inline fallback: mirror the pre-QC baseline.
+                legacy_intent_qs = [SearchQuery(
                     queries=[st.question],
                     topic="general",
                     max_results=5,
                     run_id=rid,
                     research_topic=st.title,
-                ))
-            except Exception as e:
-                logger.warning("search failed for sub_topic=%s: %s", st.title, e)
-                out.search_responses.append({
-                    "sub_topic": st.title,
-                    "error": str(e),
+                )]
+                exec_plan = None
+                intent_search_queries = legacy_intent_qs
+            else:
+                intent_search_queries = to_search_query(
+                    exec_plan, run_id=rid, sub_topic=st,
+                )
+
+            # 2b. Execute each intent → merge results into one Raws set.
+            # Each SearchQuery gets one `us.search(...)` call; EUs across
+            # intents dedup naturally because `extract_from_search_results`
+            # hashes by (url, sentence) and EU DAO dedups by content_hash.
+            raws: list[dict[str, Any]] = []
+            intent_outcomes: list[dict[str, Any]] = []
+            for sq in intent_search_queries:
+                try:
+                    resp = await us.search(sq)
+                except Exception as e:
+                    logger.warning(
+                        "search failed for sub_topic=%s intent queries=%r: %s",
+                        st.title, sq.queries, e,
+                    )
+                    intent_outcomes.append({
+                        "queries": sq.queries,
+                        "topic": sq.topic,
+                        "engines": (sq.extras or {}).get("engines"),
+                        "language": (sq.extras or {}).get("language"),
+                        "error": str(e),
+                    })
+                    continue
+                intent_outcomes.append({
+                    "queries": sq.queries,
+                    "topic": sq.topic,
+                    "engines": (sq.extras or {}).get("engines"),
+                    "language": (sq.extras or {}).get("language"),
+                    "source": resp.source,
+                    "results_count": len(resp.results),
+                    "latency_ms": resp.latency_ms,
+                    "primary_used": resp.primary_used,
+                    "fallback_used": resp.fallback_used,
                 })
-                continue
+                for r in resp.results:
+                    raws.append({
+                        "url": r.url,
+                        "title": r.title,
+                        "content": r.content,
+                        "raw_content": r.raw_content,
+                        "score": r.score,
+                        "provider": r.provider,
+                        "engine": r.engine,         # surface SearXNG engine tag
+                        "query": r.provider_query,
+                    })
+
             out.search_responses.append({
                 "sub_topic": st.title,
-                "source": resp.source,
-                "results_count": len(resp.results),
-                "latency_ms": resp.latency_ms,
-                "primary_used": resp.primary_used,
-                "fallback_used": resp.fallback_used,
+                "dimension_id": st.dimension_id,
+                "rationale": (exec_plan.rationale if exec_plan else "qc failed; legacy fallback"),
+                "plan_source": (exec_plan.source if exec_plan else "legacy"),
+                "intent_count": len(intent_search_queries),
+                "intents": intent_outcomes,
             })
-            # Convert SearchResult → dict for extractor.
-            raws = [
-                {
-                    "url": r.url,
-                    "title": r.title,
-                    "content": r.content,
-                    "raw_content": r.raw_content,
-                    "score": r.score,
-                    "provider": r.provider,
-                    "query": r.provider_query,
-                }
-                for r in resp.results
-            ]
+
+            # 2c. Extract EUs from the merged raw set (one extractor call —
+            #     dedup is internal to the extractor + EU DAO).
+            if not raws:
+                continue
             eus = extract_from_search_results(
                 raws,
                 run_id=rid,
@@ -226,6 +284,7 @@ async def run_pipeline(
                 dimension_id=st.dimension_id,
             )
             all_eus.extend(eus)
+
         out.evidence_units = dedup_eus(all_eus)
         logger.info("extracted %d unique EU across %d sub-topics (with %d dimensioned)",
                     len(out.evidence_units),

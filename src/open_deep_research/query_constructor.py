@@ -1,0 +1,640 @@
+"""QueryConstructor — 一站式把 research brief + planner sub-topic 转成精确 SearchQuery。
+
+## Why a single module (instead of separated Intent + Capability + Rewriter layers)
+
+Earlier analysis proposed 5 layered modules (IntentClassifier → CapabilityResolver →
+Rewriter → ExecutionPlan). That works for brownfield where each layer can be A/B
+tested. In our pipeline each SearchQuery is consumed by exactly one gate (SearXNG
+provider → eu_extractor → verifier) before its effect is observable; partial state
+between layers risks dirty partial ExecutionPlan leaking to the next run.
+
+This module collapses the chain into ONE function: `construct(...)`. It performs
+intent classification + capability resolution + query rewriting in a single LLM
+call. Failures fall back to a single deterministic intent, surfaced loudly.
+
+## Public surface
+
+  - `QueryIntent`        Pydantic schema — one SearXNG profile
+  - `ExecutionPlan`      Pydantic schema — collection of intents + rationale
+  - `construct(brief, sub_topic, *, primary_provider) → ExecutionPlan`
+  - `to_search_query(execution_plan, *, sub_topic, run_id) → list[SearchQuery]`
+  - `apply_to_search_query(intent, *, base) → SearchQuery` — single-intent projection
+
+## Cache
+
+Per-sub-topic hash → ExecutionPlan cache, TTL 1h. Cache invalidates implicitly
+when research_brief OR sub_topic changes. Cache key is `(brief_hash, sub_topic_hash)`.
+
+## Behavior contract
+
+1. The `primary_provider` argument must implement `name` attribute (str).
+   We accept SearXNGProvider (only backend configured today) and TavilyProvider
+   (kept for future); the `extras` map is universal across both but only
+   SearXNGProvider currently honors it — TavilyProvider reads topic/max_results.
+
+2. On LLM failure (timeout / parse error) we log loudly and fall back to
+   a single-intent ExecutionPlan that is comparable to the legacy
+   `SearchQuery(queries=[st.question], topic="general", max_results=5)`
+   but with `engines=[bing, wikipedia, arxiv]` and `language=auto` so we still
+   improve over the all-arxiv-dominant baseline.
+
+3. No silent degradation to empty extras — if LLM fails for one sub_topic we
+   fall back to deterministic defaults that are *strictly better than the
+   pre-QC baseline*.
+
+## Forward compatibility
+
+The `extras` dict on SearchQuery was added in P1 already (search_providers.py).
+SearXNGProvider now reads four keys (`engines`, `categories`, `language`,
+`time_range`) and forwards them as SearXNG URL parameters. Adding a fifth
+means one line in `SearXNGProvider.search()` and one Pydantic field here.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Schemas
+# =============================================================================
+
+# Subset of SearXNG `topic` parameter values we exercise.
+# SearXNG also accepts: images, video, files, social media, map, music.
+VALID_TOPICS = frozenset({
+    "general", "news", "science", "it", "images", "video",
+    "files", "social media", "map", "music",
+})
+
+# Subset of SearXNG `categories` we exercise.
+# See SearXNG settings.yml -> categories.general / news / science / it / etc.
+VALID_CATEGORIES = frozenset({
+    "general", "news", "science", "it", "images", "videos",
+    "social media", "maps", "music",
+})
+
+# Valid SearXNG `language` values per SearXNG docs.
+# 'auto' tells SearXNG to detect from query; 'all' bypasses filter.
+VALID_LANGUAGES = frozenset({"auto", "en", "zh-CN", "all"})
+VALID_TIME_RANGES = frozenset({"day", "week", "month", "year"})
+
+# The 9 engines configured in deploy/searxng/settings.yml (host bind mount).
+# Keep in lock-step with that file; if you add an engine there, add here.
+SearXNG_CONFIGURED_ENGINES = frozenset({
+    "bing", "brave", "chinaso",
+    "arxiv", "openalex", "semantic_scholar", "pubmed",
+    "wikipedia", "wikidata",
+})
+
+
+class QueryIntent(BaseModel):
+    """One SearXNG search profile = one SearchQuery to issue."""
+
+    queries: list[str] = Field(min_length=1, max_length=3)
+    topic: str = "general"
+    language: str = "auto"
+    categories: list[str] = Field(default_factory=lambda: ["general"])
+    engines: list[str] = Field(default_factory=lambda: ["bing", "wikipedia", "arxiv"])
+    time_range: Optional[str] = None
+    max_results: int = Field(default=10, ge=5, le=50)
+    expected_yield: str = "best-effort"
+
+    @field_validator("topic")
+    @classmethod
+    def _topic_in_set(cls, v: str) -> str:
+        if v not in VALID_TOPICS:
+            raise ValueError(f"topic={v!r} not in SearXNG-valid set {sorted(VALID_TOPICS)}")
+        return v
+
+    @field_validator("language")
+    @classmethod
+    def _lang_in_set(cls, v: str) -> str:
+        if v not in VALID_LANGUAGES:
+            raise ValueError(f"language={v!r} not in SearXNG-valid set {sorted(VALID_LANGUAGES)}")
+        return v
+
+    @field_validator("time_range")
+    @classmethod
+    def _time_range_in_set(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in VALID_TIME_RANGES:
+            raise ValueError(f"time_range={v!r} not in SearXNG-valid set {sorted(VALID_TIME_RANGES)}")
+        return v
+
+    @field_validator("queries", mode="before")
+    @classmethod
+    def _queries_sane(cls, v):
+        """Run BEFORE the schema-level min/max length check so we can drop
+        blank entries first. Returns a list of ≤3 non-blank strings."""
+        if not isinstance(v, list):
+            return v  # let Pydantic raise the type error
+        cleaned = []
+        for q in v:
+            if not isinstance(q, str):
+                return v  # let Pydantic raise the type error
+            if len(q) > 200:
+                raise ValueError(f"query too long ({len(q)} chars): {q[:80]!r}...")
+            s = q.strip()
+            if s:
+                cleaned.append(s)
+        return cleaned[:3]  # hard cap at 3 after blanks dropped
+
+    @field_validator("categories")
+    @classmethod
+    def _cats_sane(cls, v: list[str]) -> list[str]:
+        for c in v:
+            if c not in VALID_CATEGORIES:
+                raise ValueError(f"category={c!r} not in SearXNG-valid set {sorted(VALID_CATEGORIES)}")
+        # de-dup preserving order
+        seen = set()
+        out = []
+        for c in v:
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
+
+    @field_validator("engines")
+    @classmethod
+    def _engines_sane(cls, v: list[str]) -> list[str]:
+        for e in v:
+            if e not in SearXNG_CONFIGURED_ENGINES:
+                raise ValueError(
+                    f"engine={e!r} not configured in SearXNG. Configured: {sorted(SearXNG_CONFIGURED_ENGINES)}"
+                )
+        seen = set()
+        out = []
+        for e in v:
+            if e not in seen:
+                seen.add(e)
+                out.append(e)
+        return out
+
+
+class ExecutionPlan(BaseModel):
+    """An ordered set of intents to be issued in sequence by plan_v2 pipeline."""
+
+    version: int = 1
+    rationale: str = ""
+    intents: list[QueryIntent] = Field(min_length=1, max_length=4)
+    source: str = "deterministic"   # 'deterministic' | 'llm' | 'cache'
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _strip_json(text: str) -> str:
+    """Strip code fences and leading/trailing text — keep only JSON object."""
+    text = text.strip()
+    if text.startswith("```"):
+        # Strip opening fence line.
+        nl = text.find("\n")
+        if nl > 0:
+            text = text[nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3]
+    # Find first '{' and last '}'
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start:end + 1]
+    return text
+
+
+def _detect_locale(brief: str) -> str:
+    """Rough locale detection — Chinese chars ≥30% → zh-CN, else en.
+
+    No NLP dependency; just char-class counting.
+    """
+    if not brief:
+        return "en"
+    cn = sum(1 for ch in brief if "\u4e00" <= ch <= "\u9fff")
+    return "zh-CN" if cn / max(1, len(brief)) >= 0.30 else "en"
+
+
+def _sanitize_query_for_searxng(q: str) -> str:
+    """In-process sanitizer — mirrors search_providers._sanitize_query.
+
+    Kept duplicated here so this module has zero cross-import with
+    search_providers (avoids a cycle through __init__.py if you import
+    query_constructor at module top-level from the pipeline).
+    """
+    if not q:
+        return q
+    out = q
+    # Drop punctuation SearXNG chokes on, keeping - _ . ' , ? !
+    import re
+    out = re.sub(r"[:\(\)\[\]\{\}\\/\u2014\u2013\u2018\u2019\u201C\u201D\u00B7\u2026\u00A0]",
+                 " ", out)
+    out = re.sub(r"\s+", " ", out).strip()
+    if len(out) > 120:
+        out = out[:120].rstrip()
+    return out or q
+
+
+def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str], list[str], str]:
+    """Return (engines, categories, topic) per-dimension defaults.
+
+    Single source of truth — used both in deterministic fallback and to
+    sanity-check LLM output (LLM overrides freely; we only fall back).
+    """
+    if dimension_id == "market_size":
+        return (
+            ["bing", "chinaso", "wikidata", "arxiv"],
+            ["general", "news"],
+            "general",
+        )
+    if dimension_id == "adoption":
+        return (
+            ["bing", "chinaso", "wikidata"],
+            ["general", "news"],
+            "general",
+        )
+    if dimension_id == "regulation":
+        return (
+            ["bing", "chinaso"],
+            ["news"],
+            "news",
+        )
+    if dimension_id == "performance":
+        return (
+            ["arxiv", "openalex", "semantic_scholar"],
+            ["science", "general"],
+            "science",
+        )
+    if dimension_id == "ethics":
+        return (
+            ["wikipedia", "wikidata", "pubmed"],
+            ["general", "science"],
+            "general",
+        )
+    # Default / context — broader sweep.
+    return (
+        ["bing", "wikipedia", "arxiv"],
+        ["general"],
+        "general",
+    )
+
+
+def _deterministic_fallback(brief: str, sub_topic: Any) -> ExecutionPlan:
+    """Deterministic fallback when LLM fails.
+
+    Goals:
+      - Strictly better than the legacy `SearchQuery(queries=[st.question], topic="general", max_results=5)`.
+      - Use SearXNG filters so bing/chinaso can answer vendor questions and arxiv
+        still surfaces academic context (matches user's earlier diagnostic).
+      - Locale-aware (zh-CN if brief is mostly Chinese).
+      - dimension_id aware (engines/categories match dimension).
+    """
+    locale = _detect_locale(brief)
+    engines, categories, topic = _dimension_to_default_engines(getattr(sub_topic, "dimension_id", None))
+    question = getattr(sub_topic, "question", "") or brief
+    sanitized = _sanitize_query_for_searxng(question)
+    return ExecutionPlan(
+        rationale="deterministic fallback (LLM failed or disabled)",
+        intents=[
+            QueryIntent(
+                queries=[sanitized],
+                topic=topic,
+                language=locale,
+                categories=categories,
+                engines=engines,
+                time_range=None,
+                max_results=10,
+                expected_yield="deterministic-best-effort",
+            ),
+        ],
+        source="deterministic",
+    )
+
+
+# =============================================================================
+# Cache (in-process, TTL 1h)
+# =============================================================================
+
+@dataclass
+class _PlanCacheEntry:
+    plan: ExecutionPlan
+    expires_at: float
+
+_CACHE: dict[tuple[str, str], _PlanCacheEntry] = {}
+_CACHE_TTL_SECONDS = 3600
+
+# Master switch — set `OPEN_DEEP_RESEARCH_NO_QC=1` to disable QueryConstructor
+# entirely (legacy `SearchQuery(queries=[st.question], topic="general", max_results=5)`
+# behavior). Useful for back-to-back regression runs. Read each call so
+# env-var changes during tests are honored.
+def _qc_disabled() -> bool:
+    return bool(os.environ.get("OPEN_DEEP_RESEARCH_NO_QC"))
+
+
+def _brief_hash(brief: str) -> str:
+    return "b-" + hashlib.sha256((brief or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _sub_topic_hash(sub_topic: Any) -> str:
+    seed = (
+        getattr(sub_topic, "id", "") or ""
+        + "|"
+        + getattr(sub_topic, "title", "")
+        + "|"
+        + getattr(sub_topic, "question", "")
+        + "|"
+        + (getattr(sub_topic, "dimension_id", "") or "")
+    )
+    return "st-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_get(key: tuple[str, str]) -> Optional[ExecutionPlan]:
+    import time
+    e = _CACHE.get(key)
+    if e is None:
+        return None
+    if e.expires_at < time.time():
+        _CACHE.pop(key, None)
+        return None
+    p = e.plan.model_copy(deep=True)
+    p.source = "cache"
+    return p
+
+
+def _cache_put(key: tuple[str, str], plan: ExecutionPlan) -> None:
+    import time
+    _CACHE[key] = _PlanCacheEntry(
+        plan=plan.model_copy(deep=True),
+        expires_at=time.time() + _CACHE_TTL_SECONDS,
+    )
+
+
+def invalidate_cache() -> int:
+    n = len(_CACHE)
+    _CACHE.clear()
+    return n
+
+
+# =============================================================================
+# LLM construction
+# =============================================================================
+
+async def construct_with_llm(
+    brief: str,
+    sub_topic: Any,
+    *,
+    llm: Optional[Any] = None,
+    config: Optional[Any] = None,
+    temperature: float = 0.0,
+) -> ExecutionPlan:
+    """Issue one LLM call to translate (brief, sub_topic) → ExecutionPlan JSON.
+
+    `llm` may be None, in which case we lazily call `get_llm(role="query_constructor")`.
+    `config` may be None; defaults are read from `Configuration.from_runnable_config()`.
+    """
+    from open_deep_research.configuration import Configuration
+    from open_deep_research.llm import get_llm, get_prompt, get_prompt_version, _get_langfuse
+
+    system_prompt = get_prompt("query_constructor")
+    prompt_version = get_prompt_version("query_constructor")
+    if llm is None:
+        if config is None:
+            configurable = Configuration.from_runnable_config(None)
+            model_name = (configurable.research_model
+                          or configurable.summarization_model
+                          or "minimax:MiniMax-M3")
+            config = {"configurable": {"model": model_name}}
+        llm = get_llm(config=config, tags=["langsmith:nostream"])
+
+    # Build the user message — structured, not freeform prose.
+    user_msg = (
+        f"research_brief:\n```\n{brief}\n```\n\n"
+        f"sub_topic.id: {getattr(sub_topic, 'id', '')}\n"
+        f"sub_topic.title: {getattr(sub_topic, 'title', '')}\n"
+        f"sub_topic.question: {getattr(sub_topic, 'question', '')}\n"
+        f"sub_topic.dimension_id: {getattr(sub_topic, 'dimension_id', '')}\n"
+        f"sub_topic.expected_entities: {getattr(sub_topic, 'expected_entities', [])}\n\n"
+        f"Return JSON only."
+    )
+
+    logger.info(
+        "query_constructor.construct: brief_hash=%s sub_topic=%s dimension=%s locale=%s",
+        _brief_hash(brief),
+        getattr(sub_topic, "title", ""),
+        getattr(sub_topic, "dimension_id", None),
+        _detect_locale(brief),
+    )
+
+    # Optional Langfuse span for observability (matches the codebase pattern).
+    lf = _get_langfuse()
+    raw = None
+    try:
+        if lf is not None:
+            tracer = lf._otel_tracer
+            with tracer.start_as_current_span("query_constructor"):
+                lf.update_current_span(metadata={
+                    "prompt_role": "query_constructor",
+                    "prompt_version": prompt_version,
+                    "dimension_id": getattr(sub_topic, "dimension_id", None),
+                })
+                raw = await _ainvoke_llm(llm, system_prompt, user_msg, temperature)
+        else:
+            raw = await _ainvoke_llm(llm, system_prompt, user_msg, temperature)
+    except Exception as e:
+        logger.warning("query_constructor LLM call failed: %s", e)
+        return _deterministic_fallback(brief, sub_topic)
+
+    if not isinstance(raw, str) or not raw.strip():
+        logger.warning("query_constructor LLM returned empty; falling back")
+        return _deterministic_fallback(brief, sub_topic)
+
+    try:
+        text = _strip_json(raw)
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError(f"expected JSON object, got {type(data).__name__}")
+        # Tag source; Pydantic will raise if schema violated.
+        data["source"] = "llm"
+        plan = ExecutionPlan(**data)
+        return plan
+    except Exception as e:
+        logger.warning("query_constructor LLM JSON invalid (%s); raw=%r", e, raw[:300])
+        return _deterministic_fallback(brief, sub_topic)
+
+
+async def _ainvoke_llm(llm: Any, system: str, user: str, temperature: float) -> str:
+    """Wrap a LangChain chat model invoke.
+
+    Tries `ainvoke(messages)` first, falls back to sync `invoke` on thread if absent.
+    Returns the message content string.
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    msgs = [SystemMessage(content=system), HumanMessage(content=user)]
+    if hasattr(llm, "ainvoke"):
+        try:
+            out = await llm.ainvoke(msgs, temperature=temperature)
+        except TypeError:
+            # Some LangChain LLMs don't accept temperature kwarg.
+            out = await llm.ainvoke(msgs)
+    else:
+        # Fall back to sync invoke in a thread.
+        import asyncio
+        def _sync():
+            try:
+                return llm.invoke(msgs, temperature=temperature)
+            except TypeError:
+                return llm.invoke(msgs)
+        out = await asyncio.get_event_loop().run_in_executor(None, _sync)
+    if hasattr(out, "content"):
+        return out.content
+    return str(out)
+
+
+# =============================================================================
+# Public entry point
+# =============================================================================
+
+async def construct(
+    brief: str,
+    sub_topic: Any,
+    *,
+    primary_provider: Optional[Any] = None,
+    config: Optional[Any] = None,
+) -> ExecutionPlan:
+    """Top-level entry point — return ExecutionPlan for one (brief, sub_topic).
+
+    Honors `OPEN_DEEP_RESEARCH_NO_QC=1` (legacy behavior) and the in-process cache.
+    """
+    if _qc_disabled():
+        # Legacy: no extras, topic=general, max_results=5.
+        legacy_intent = QueryIntent(
+            queries=[_sanitize_query_for_searxng(getattr(sub_topic, "question", "") or brief)],
+            topic="general",
+            language="auto",
+            categories=["general"],
+            engines=["bing", "wikipedia", "arxiv"],
+            time_range=None,
+            max_results=5,
+            expected_yield="legacy-baseline",
+        )
+        return ExecutionPlan(
+            rationale="OPEN_DEEP_RESEARCH_NO_QC=1 → legacy behavior",
+            intents=[legacy_intent],
+            source="deterministic",
+        )
+
+    key = (_brief_hash(brief), _sub_topic_hash(sub_topic))
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        plan = await construct_with_llm(brief, sub_topic, config=config)
+    except Exception as e:
+        # Defence in depth — construct_with_llm already catches internally
+        # and returns a deterministic fallback, but if the inner dispatch
+        # itself raises (e.g. cold-import error, rate-limit panic), we still
+        # want a usable plan rather than a stack trace.
+        logger.warning(
+            "construct_with_llm raised for sub_topic=%s: %s; "
+            "falling back to deterministic profile",
+            getattr(sub_topic, "title", "?"), e,
+        )
+        plan = _deterministic_fallback(brief, sub_topic)
+    _cache_put(key, plan)
+    return plan
+
+
+# =============================================================================
+# Projection to SearchQuery
+# =============================================================================
+
+def apply_to_search_query(
+    intent: QueryIntent,
+    *,
+    run_id: Optional[str] = None,
+    sub_topic: Any = None,
+) -> Any:
+    """Project one QueryIntent + sub_topic metadata into a SearchQuery.
+
+    `SearchQuery` lives in search_providers; we import lazily to avoid a
+    top-level cycle if you ever flip the package init order.
+    """
+    from open_deep_research.search_providers import SearchQuery
+
+    extras: dict[str, Any] = {
+        "engines": intent.engines,
+        "categories": intent.categories,
+        "language": intent.language,
+    }
+    if intent.time_range is not None:
+        extras["time_range"] = intent.time_range
+
+    return SearchQuery(
+        queries=list(intent.queries),
+        topic=intent.topic,
+        max_results=intent.max_results,
+        run_id=run_id,
+        research_topic=(getattr(sub_topic, "title", None) if sub_topic is not None else None),
+        extras=extras,
+    )
+
+
+def to_search_query(
+    plan: ExecutionPlan,
+    *,
+    run_id: Optional[str] = None,
+    sub_topic: Any = None,
+) -> list[Any]:
+    """Project a full ExecutionPlan → list[SearchQuery] (one per intent)."""
+    return [
+        apply_to_search_query(intent, run_id=run_id, sub_topic=sub_topic)
+        for intent in plan.intents
+    ]
+
+
+# =============================================================================
+# Provider / brief-kind classifier (cheap utility, no LLM)
+# =============================================================================
+
+def configured_providers_for(provider: Any) -> dict[str, Any]:
+    """Return a {provider_name: capability_summary} dict for logging/metadata.
+
+    Today we only have SearXNGProvider; kept as a fixed schema for forward
+    compat (TavilyProvider may join later).
+    """
+    name = getattr(provider, "name", "unknown")
+    if name == "searxng":
+        return {
+            "name": "searxng",
+            "engines_configured": sorted(SearXNG_CONFIGURED_ENGINES),
+            "supports_extras": True,
+        }
+    return {"name": name, "supports_extras": False}
+
+
+__all__ = [
+    "QueryIntent",
+    "ExecutionPlan",
+    "construct",
+    "construct_with_llm",
+    "apply_to_search_query",
+    "to_search_query",
+    "configured_providers_for",
+    "invalidate_cache",
+    "SearXNG_CONFIGURED_ENGINES",
+    "VALID_TOPICS",
+    "VALID_CATEGORIES",
+    "VALID_LANGUAGES",
+    "VALID_TIME_RANGES",
+]

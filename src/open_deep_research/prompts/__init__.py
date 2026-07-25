@@ -67,6 +67,12 @@ REGISTRY: dict[str, PromptSpec] = {
         attribute="EXTRACT_PROMPT",
         version="extractor_v1",
     ),
+    "query_constructor": PromptSpec(
+        role="query_constructor",
+        module="open_deep_research.prompts.query_constructor_v1",
+        attribute="QUERY_CONSTRUCTOR_SYSTEM_PROMPT",
+        version="query_constructor_v1",
+    ),
 }
 
 

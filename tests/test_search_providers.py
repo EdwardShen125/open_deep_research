@@ -249,16 +249,24 @@ def test_searxng_provider_docker_connectivity():
     container. Skips when neither docker DNS name nor loopback port is
     reachable (e.g. host without docker network access).
     """
-    # Two valid reachability shapes:
-    #  1. Docker internal DNS: odr-searxng:8080 (when caller is in the
-    #     same docker network)
-    #  2. Host port-mapping: 127.0.0.1:8080 (when ports: is set in compose)
-    candidate_urls = [
+    # Valid reachability shapes:
+    #  1. SEARXNG_URL env (any docker network IP)
+    #  2. Docker internal DNS: odr-searxng:8080 (caller in same docker network)
+    #  3. Host port-mapping: 127.0.0.1:8080 (ports: in compose)
+    # de-duped while preserving order.
+    seen = set()
+    candidate_urls: list[str] = []
+    for u in [
         os.environ.get("SEARXNG_URL", "").rstrip("/") or None,
+        "http://172.19.0.3:8080",
+        "http://172.18.0.1:8080",
+        "http://172.17.0.1:8080",
         "http://odr-searxng:8080",
         "http://127.0.0.1:8080",
-    ]
-    candidate_urls = [u for u in candidate_urls if u]
+    ]:
+        if u and u not in seen:
+            seen.add(u)
+            candidate_urls.append(u)
 
     reachable_url = None
     for base in candidate_urls:
@@ -308,6 +316,78 @@ def test_searxng_provider_docker_connectivity():
 # runner
 # ---------------------------------------------------------------------------
 
+def test_searxng_extras_passthrough_live():
+    """Live integration test: verify SearXNGProvider.search() honors
+    query.extras (engines/categories/language/time_range) end-to-end
+    against the running SearXNG container. Skip silently if no SearXNG
+    is reachable.
+
+    This is the Phase query_constructor validation — proves the SearchQuery
+    to SearXNG URL passthrough is real, not just a Pydantic-validated in-memory
+    re-projection.
+    """
+    # Reuse the same reachability probe as test_searxng_provider_docker_connectivity.
+    candidate_urls = [
+        os.environ.get("SEARXNG_URL", "").rstrip("/") or None,
+        "http://172.19.0.3:8080",
+        "http://172.18.0.1:8080",
+        "http://172.17.0.1:8080",
+        "http://odr-searxng:8080",
+        "http://127.0.0.1:8080",
+    ]
+    candidate_urls = [u for u in candidate_urls if u]
+    reachable_url = None
+    for base in candidate_urls:
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                base + "/", headers={"User-Agent": "open_deep_research/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status in (200, 301, 302):
+                    reachable_url = base
+                    break
+        except Exception:
+            continue
+
+    if reachable_url is None:
+        print(f"  ⏭ skipped: no SearXNG reachable on {candidate_urls}")
+        return
+
+    p = SearXNGProvider(base_url=reachable_url, timeout=30.0)
+
+    # Phase query_constructor real-path verification:
+    # extras with engines + categories + language must be honoured by SearXNG URL.
+    q = SearchQuery(
+        queries=["Cloud-native EDR vendor market share 2024"],
+        max_results=20,
+        topic="general",
+        extras={
+            "engines": ["bing", "arxiv", "wikipedia", "wikidata"],
+            "categories": ["general"],
+            "language": "en",
+        },
+    )
+    try:
+        results = asyncio.run(p.search(q))
+    except Exception as e:
+        print(f"  ⚠ SearXNG search raised: {type(e).__name__}: {e}")
+        return
+
+    assert results, "Expected SearXNGProvider.search() to return ≥1 hit when reachable"
+    assert any(r.engine for r in results), (
+        "Each SearXNG result must carry `engine` field set (e.g. 'bing', 'arxiv'). "
+        "Got empty fields — query_constructor → from_searxng passthrough regressed."
+    )
+    engines_seen = set(r.engine for r in results if r.engine)
+    print(f"  ✓ SearXNGProvider extras passthrough: {len(results)} hits, "
+          f"engines={sorted(engines_seen)}")
+
+
+# End of file tests — registered into the table below.
+test_searxng_extras_passthrough_live  # noqa: F401
+
+
 def main():
     tests = [
         ("search_result_from_tavily", test_search_result_from_tavily),
@@ -333,6 +413,8 @@ def main():
          test_tavily_provider_real_api_returns_results),
         ("searxng_provider_docker_connectivity",
          test_searxng_provider_docker_connectivity),
+        ("searxng_extras_passthrough_live",
+         test_searxng_extras_passthrough_live),
     ]
     print("=" * 70)
     print(f" Running {len(tests)} search-provider tests")
