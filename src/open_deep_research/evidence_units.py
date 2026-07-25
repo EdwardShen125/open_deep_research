@@ -450,7 +450,12 @@ class EvidenceUnit:
             source_title=self.source_title,
             published_at=None,
             source_tier=source_tier,
-            source_span=self.quote or self.claim,  # 旧 quote 是 ≤200 字符的整句
+            # Runbook 1.1 schema 要求 source_span ≥ 10 字符。`quote` 是 v1
+            # deterministic extractor 截到 ≤200 字符的整句,有时短于 10 字符
+            # (例如 'DC).' / 'Set up ...')。当 quote 不够长时,降级用 claim
+            # 兜底;再不够就构造一个明确标记的占位 span,绝不让 Pydantic 抛
+            # 校验错阻断 EuDAO.upsert_many 的整批写入。
+            source_span=_resolve_source_span(self.quote, self.claim),
             span_start=None,
             span_end=None,
             extractor_model=self.extraction_method,
@@ -517,6 +522,43 @@ class EvidenceUnit:
             extraction_method="tavily_summary",
             run_id=run_id,
         )
+
+
+# =============================================================================
+# v1 → v2 source_span resolution
+# =============================================================================
+
+# Phase-3 schema 强制 source_span ≥ 10 字符 (Runbook 1.1)。
+# v1 deterministic extractor 的 `quote` 是 ≤200 字符的整句片段,但偶尔
+# 会产出短句(例如 'DC).' / 'It.' / 'Set up ...'),直接传给 EvidenceUnitV2
+# 会让 EuDAO.upsert_many 在 Pydantic validation 阶段抛错,阻断整批写入。
+# 这里给出显式降级链:quote → claim → 哨兵占位 span,绝不抛错。
+SOURCE_SPAN_MIN_LEN = 10
+SOURCE_SPAN_FALLBACK = "[span unavailable: source text too short]"
+
+
+def _resolve_source_span(quote: Optional[str], claim: Optional[str]) -> str:
+    """Pick a source_span ≥ SOURCE_SPAN_MIN_LEN from (quote, claim) pair.
+
+    Preference order:
+      1. `quote` if non-empty AND ≥ 10 chars (this is the original LLM-extracted
+         verbatim fragment; closest thing to the actual source text).
+      2. `claim` if non-empty (the EU's own statement, longer by construction).
+      3. `_SOURCE_SPAN_FALLBACK` sentinel so Pydantic never sees the empty/
+         short-string failure mode — it's a transparent marker that downstream
+         span verification (闸 1) will reject as ``span_verified=False``.
+    """
+    for candidate in (quote, claim):
+        if candidate and len(candidate.strip()) >= SOURCE_SPAN_MIN_LEN:
+            return candidate.strip()
+    # Pad the sentinel + claim (or its absence) into a longer string so we
+    # never accidentally trip the min_length check even after whitespace
+    # normalization. The sentinel alone is already ≥ 10 chars, but the
+    # combined form makes the placeholder self-describing in logs.
+    base = (claim or "").strip()
+    if base:
+        return f"{SOURCE_SPAN_FALLBACK} (claim: {base})"
+    return SOURCE_SPAN_FALLBACK
 
 
 # =============================================================================

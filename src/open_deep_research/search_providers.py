@@ -240,12 +240,25 @@ class TavilyProvider:
             for q in query.queries
         ]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
+        errors: list[str] = []
         for q, resp in zip(query.queries, responses):
             if isinstance(resp, Exception):
                 # Skip but record; UnifiedSearch decides whether to retry.
+                errors.append(f"{type(resp).__name__}: {resp}")
                 continue
             for raw in resp.get("results", []) or []:
                 results.append(SearchResult.from_tavily(raw, q))
+        if not results and query.queries:
+            # Surface Tavily exhaustion (e.g. 432 monthly quota) as a real
+            # provider failure so UnifiedSearch can record it in
+            # failed_providers and operators can see it in logs. Returning []
+            # silently here would mask Tavily being rate-limited, leaving
+            # callers wondering why SearXNG fallback never ran.
+            raise AllProvidersFailed(
+                f"TavilyProvider returned 0 results across {len(query.queries)} query(s); "
+                f"errors={errors}",
+                failed=[self.name],
+            )
         return results
 
 
@@ -279,6 +292,7 @@ class SearXNGProvider:
     async def search(self, query: SearchQuery) -> list[SearchResult]:
         fetcher = self._fetcher or self._default_fetcher
         results: list[SearchResult] = []
+        errors: list[str] = []
         # Phase query_constructor: query.extras now drives SearXNG-side
         # filtering. Forwarded SearXNG parameters (when present in extras):
         #   engines   → ?engines=bing,arxiv
@@ -327,9 +341,22 @@ class SearXNGProvider:
                     logger.warning("[SEARXNG] fetcher raised: %s: %s", type(e).__name__, e)
                 else:
                     logger.warning("SearXNGProvider fetcher failed (%s): %s", type(e).__name__, e)
+                errors.append(f"{type(e).__name__}: {e}")
                 continue
             for raw in resp.get("results", []) or []:
                 results.append(SearchResult.from_searxng(raw, q))
+        if not results and query.queries:
+            # Surface SearXNG outages / DNS errors / engine-empty responses
+            # as a real provider failure so UnifiedSearch records it in
+            # failed_providers and operators can act on it. Without this we
+            # used to silently return [] when every engine returned nothing,
+            # which masked whether SearXNG was up or whether the query just
+            # had no hits.
+            raise AllProvidersFailed(
+                f"SearXNGProvider returned 0 results across {len(query.queries)} query(s); "
+                f"base_url={self._base_url} errors={errors}",
+                failed=[self.name],
+            )
         return results
 
     async def _default_fetcher(self, url: str, params: dict, timeout: float) -> dict:
@@ -451,7 +478,8 @@ class UnifiedSearch:
         if not resp.results:
             raise AllProvidersFailed(
                 f"All providers failed for queries={query.queries!r}; "
-                f"failed={resp.failed_providers}"
+                f"failed={resp.failed_providers}",
+                failed=list(resp.failed_providers),
             )
 
         # ---- 4. side effects: registration + write-through cache ----
@@ -505,7 +533,17 @@ class UnifiedSearch:
 # =============================================================================
 
 class AllProvidersFailed(Exception):
-    """Both primary and fallback providers returned 0 results."""
+    """Raised when one or more search providers fail to return results.
+
+    Carries ``failed`` (a list of provider names that contributed to the
+    failure) so operators can tell *which* providers gave up — without
+    this, callers used to log ``failed=[]`` and had to dig into message
+    text to figure out whether Tavily hit its quota or SearXNG was down.
+    """
+
+    def __init__(self, message: str, failed: Optional[list[str]] = None) -> None:
+        super().__init__(message)
+        self.failed: list[str] = list(failed) if failed else []
 
 
 # =============================================================================

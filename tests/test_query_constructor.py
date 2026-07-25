@@ -44,6 +44,7 @@ from open_deep_research.search_providers import (
     SearchQuery,
     SearXNGProvider,
     SearchResult,
+    AllProvidersFailed,
 )
 
 
@@ -261,12 +262,20 @@ def test_no_qc_returns_legacy_baseline(monkeypatch):
 
 def test_searxng_provider_no_extras_preserves_legacy_4_params():
     """When SearchQuery has no `extras`, the URL params must be *byte-identical*
-    to the pre-QC baseline (4 keys: q, format, language='auto', safesearch=0)."""
+    to the pre-QC baseline (4 keys: q, format, language='auto', safesearch=0).
+
+    Note: SearXNGProvider now raises AllProvidersFailed when every query
+    returns 0 results (so UnifiedSearch can record the failure). The test
+    verifies both the URL shape *and* that the exception surfaces the
+    right ``failed=[self.name]`` so operators can see it in logs.
+    """
     fetcher, calls = _capture_fetcher()
     sp = SearXNGProvider(base_url="http://test", fetcher=fetcher)
 
     sq = SearchQuery(queries=["x"], topic="general")  # no extras → legacy path
-    asyncio.run(sp.search(sq))
+    with pytest.raises(AllProvidersFailed) as excinfo:
+        asyncio.run(sp.search(sq))
+    assert excinfo.value.failed == ["searxng"]
 
     assert len(calls) == 1
     url, params, _ = calls[0]
@@ -298,7 +307,9 @@ def test_searxng_provider_passes_engines_categories_language_time_range():
             "time_range": "year",
         },
     )
-    asyncio.run(sp.search(sq))
+    with pytest.raises(AllProvidersFailed) as excinfo:
+        asyncio.run(sp.search(sq))
+    assert excinfo.value.failed == ["searxng"]
 
     assert len(calls) == 1
     _, params, _ = calls[0]
@@ -318,12 +329,69 @@ def test_searxng_provider_partial_extras_only_emits_present_params():
         queries=["q"],
         extras={"engines": ["bing"]},
     )
-    asyncio.run(sp.search(sq))
+    with pytest.raises(AllProvidersFailed):
+        asyncio.run(sp.search(sq))
     _, params, _ = calls[0]
     assert params["engines"] == "bing"
     assert "categories" not in params, "categories only forwarded when present in extras"
     assert "time_range" not in params
     assert params["language"] == "auto", "partial extras must not clobber default language"
+
+
+# =============================================================================
+# 6b. Providers surface AllProvidersFailed.failed instead of silent []
+# =============================================================================
+# These guard the change that makes Tavily/SearXNG raise AllProvidersFailed
+# with failed=[self.name] when every query returns 0 results. Without this,
+# UnifiedSearch used to log `failed=[]` and operators had no clue whether
+# Tavily hit its quota or SearXNG was down.
+
+def test_searxng_provider_raises_with_self_name_when_all_queries_return_empty():
+    """Mock fetcher returns {'results': []} for every query → SearXNGProvider
+    must raise AllProvidersFailed with failed=['searxng']."""
+    fetcher, _ = _capture_fetcher()  # default returns {"results": []}
+    sp = SearXNGProvider(base_url="http://test", fetcher=fetcher)
+    sq = SearchQuery(queries=["q1", "q2", "q3"])
+    with pytest.raises(AllProvidersFailed) as excinfo:
+        asyncio.run(sp.search(sq))
+    assert excinfo.value.failed == ["searxng"], (
+        f"failed must include self.name; got {excinfo.value.failed!r}"
+    )
+    msg = str(excinfo.value)
+    assert "3 query" in msg
+    assert "http://test" in msg
+
+
+def test_searxng_provider_returns_results_does_not_raise():
+    """Mock fetcher returns 1 result → no exception, list returned."""
+    async def fetcher(url, params, timeout):
+        return {"results": [{"url": "http://a", "title": "a", "content": "x"}]}
+    sp = SearXNGProvider(base_url="http://test", fetcher=fetcher)
+    sq = SearchQuery(queries=["q1"])
+    results = asyncio.run(sp.search(sq))
+    assert len(results) == 1
+    assert results[0].url == "http://a"
+
+
+def test_unified_search_records_failed_provider_when_serxng_exhausted():
+    """End-to-end: UnifiedSearch sees SearXNG raise AllProvidersFailed →
+    failed_providers gets 'searxng' → final AllProvidersFailed has
+    failed=['searxng'] (not [])."""
+    from open_deep_research.search_providers import UnifiedSearch, SearXNGProvider
+
+    async def empty_fetcher(url, params, timeout):
+        return {"results": []}
+    primary = SearXNGProvider(base_url="http://primary", fetcher=empty_fetcher)
+    fallback = SearXNGProvider(base_url="http://fallback", fetcher=empty_fetcher)
+    us = UnifiedSearch(primary=primary, fallback=fallback)
+
+    sq = SearchQuery(queries=["x"], topic="general")
+    with pytest.raises(AllProvidersFailed) as excinfo:
+        asyncio.run(us.search(sq))
+    # Both primary AND fallback tried; both contributed.
+    assert "searxng" in excinfo.value.failed, (
+        f"failed must include the providers that raised; got {excinfo.value.failed!r}"
+    )
 
 
 # =============================================================================

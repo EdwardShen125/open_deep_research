@@ -247,3 +247,98 @@ def test_legacy_bridge_preserves_content_hash_across_invocation():
     h1 = legacy.content_hash
     v2 = legacy.to_v2(run_id=str(uuid.uuid4()))
     assert v2.content_hash == h1
+
+
+# =============================================================================
+# v1 → v2 source_span fallback chain
+# =============================================================================
+# Phase 3 schema (EvidenceUnitV2) requires source_span ≥ 10 chars. The v1
+# deterministic extractor occasionally produces short quotes (e.g. 'DC).',
+# 'It.', 'Set up ...'). Without a graceful fallback, EuDAO.upsert_many would
+# blow up on the whole batch. These tests guard the fallback chain:
+#   1. long quote preferred
+#   2. long claim used when quote is too short
+#   3. sentinel fallback when both are too short
+
+def test_legacy_bridge_long_quote_used_as_source_span():
+    from open_deep_research.evidence_units import EvidenceUnit as LegacyEU
+    legacy = LegacyEU(
+        claim="X is a major EDR vendor founded in 2011.",
+        quote="X is a major EDR vendor founded in 2011.",
+        source_url="https://x.com",
+    )
+    v2 = legacy.to_v2(run_id=str(uuid.uuid4()))
+    assert v2.source_span == "X is a major EDR vendor founded in 2011."
+    assert len(v2.source_span) >= 10
+
+
+def test_legacy_bridge_short_quote_falls_back_to_claim():
+    """The bug case: quote='DC).' (5 chars) used to crash EuDAO.upsert_many.
+    Now to_v2() falls back to the longer claim so the EU lands in PG."""
+    from open_deep_research.evidence_units import EvidenceUnit as LegacyEU
+    legacy = LegacyEU(
+        claim="CrowdStrike is a major US endpoint security vendor.",
+        quote="DC).",  # only 5 chars — the historic failure mode
+        source_url="https://www.crowdstrike.com",
+    )
+    v2 = legacy.to_v2(run_id=str(uuid.uuid4()))
+    assert len(v2.source_span) >= 10, (
+        f"source_span too short even after fallback: {v2.source_span!r}"
+    )
+    # The claim was long enough, so it should win.
+    assert v2.source_span == "CrowdStrike is a major US endpoint security vendor."
+
+
+def test_legacy_bridge_both_short_uses_sentinel_fallback():
+    """Worst case: quote and claim both < 10 chars → use the sentinel so
+    Pydantic doesn't reject the batch. Operators see the sentinel in logs
+    and know the EU has no usable span."""
+    from open_deep_research.evidence_units import EvidenceUnit as LegacyEU
+    legacy = LegacyEU(
+        claim="x",  # 1 char
+        quote="y",  # 1 char
+        source_url="https://x.com",
+    )
+    v2 = legacy.to_v2(run_id=str(uuid.uuid4()))
+    assert len(v2.source_span) >= 10
+    assert "[span unavailable" in v2.source_span
+
+
+def test_legacy_bridge_quote_none_falls_back_to_claim():
+    """quote=None (legitimate case for EUs where extractor couldn't quote)
+    must still produce a ≥10 char source_span from the claim."""
+    from open_deep_research.evidence_units import EvidenceUnit as LegacyEU
+    legacy = LegacyEU(
+        claim="SentinelOne is a US endpoint security vendor founded in 2013.",
+        quote=None,
+        source_url="https://sentinelone.com",
+    )
+    v2 = legacy.to_v2(run_id=str(uuid.uuid4()))
+    assert v2.source_span == "SentinelOne is a US endpoint security vendor founded in 2013."
+    assert len(v2.source_span) >= 10
+
+
+def test_resolve_source_span_helper_direct():
+    """Direct test for the helper function — exhaustively cover the matrix."""
+    from open_deep_research.evidence_units import (
+        _resolve_source_span,
+        SOURCE_SPAN_FALLBACK,
+    )
+    # both None → sentinel
+    assert _resolve_source_span(None, None) == SOURCE_SPAN_FALLBACK
+    # quote None, claim None (empty strings) → sentinel
+    assert _resolve_source_span("", "") == SOURCE_SPAN_FALLBACK
+    # short quote, no claim → sentinel
+    assert _resolve_source_span("DC).", None) == SOURCE_SPAN_FALLBACK
+    # short quote, long claim → claim
+    assert (
+        _resolve_source_span("DC).", "CrowdStrike is a US EDR vendor.")
+        == "CrowdStrike is a US EDR vendor."
+    )
+    # long quote → quote (preferred)
+    long = "CrowdStrike is a US EDR vendor founded in 2011."
+    assert _resolve_source_span(long, None) == long
+    # empty quote, long claim → claim
+    assert _resolve_source_span("", long) == long
+    # whitespace-padded quote → still considered long if content >= 10
+    assert _resolve_source_span("   " + long + "   ", None) == long
