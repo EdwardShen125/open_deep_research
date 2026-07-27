@@ -1,18 +1,27 @@
-# SearXNG 配置 - 网络隔离版
-# 仅通过 internal network 提供 HTTP API,pipeline 容器不可直连外网搜索引擎
+# SearXNG 配置 - 网络隔离版 (调研优化版)
 #
-# 策略:engines 块显式列 5 个 engines — SearXNG 2026.7.x 完全替换默认列表
-#     data-accuracy-oriented:仅启用能真产出 web 内容的 engines
-#     每个 engine 强制 categories: [general] 让默认 query 命中
+# 改动 (vs 当前 4-engine 配置):
+#   - 加 bing / brave:通用 web 搜索(美国 EDR 厂商主源)
+#   - 加 chinaso (news):中国 EDR 厂商唯一本地源(英文引擎搜不到中文)
+#   - 加 openalex:200M 论文索引(EDR 学术 + 厂商技术报告)
+#   - 加 semantic_scholar:AI 驱动学术检索
+#   - 加 pubmed:备用学术
+#   - 修 wikipedia:加 language: all 让中文命中
+#   - 加 wikidata:厂商元数据(CEO/员工数/成立时间)
+#   - 保留 arxiv:EDR bypass 论文强
+#   - 删 github:缺 token 永远 access denied
+#   - 删 openstreetmap:跟 EDR 完全无关
 #
-# 实测可用(本机验证过):
-#   - arxiv   : 学术论文(免费 API,无 ban)→ EDR 相关论文可命中
-#   - github  : 代码仓库(免费 API,无 ban)→ cybersecurity 工具可命中
-#   - wikipedia: 百科(EDR 等专有词条不在,通用词条命中)
-# 实测不可用:
-#   - duckduckgo / startpage / qwant / brave / mojeek:HTML 抓取类,ban 严重
-#   - google / bing / brave:无 API key
-
+# 风险:
+#   - bing/brave:共享 IP 偶尔 ban,SearXNG 内置 retry
+#   - chinaso:官方文档警告 URL 隐私问题,只用于 news 类别(snippet only)
+#   - openalex:推荐加 mailto 进 polite pool,本配置暂不加(需重启设 env)
+#
+# 数据准确性导向(notes/evidence-pipeline-runbook-v1.md):
+#   - 优先 engines with primary source(arxiv/openalex/wikidata)
+#   - 次选 metasearch engine(bing/brave/wikipedia)
+#   - 谨慎 chinaso(只 news,snippet only)
+---
 server:
   bind_address: 0.0.0.0
   port: 8080
@@ -35,28 +44,88 @@ outgoing:
   retry_on_http_error: true
 
 engines:
-  # SearXNG 2026.7.x:engines 块完全替换默认列表
-  # 强制 categories: [general] 让默认 query 命中这些 engines
+  # ===== 通用 web 搜索(美国 EDR 厂商主源) =====
+  # bing:无 API key,通用 web,有 IP ban 风险
+  - name: bing
+    engine: bing
+    shortcut: bi
+    categories: [general]
+    disabled: false
+    # bing 没 token,有时 IP ban;SearXNG 内置 retry
+
+  # brave:无 API key,通用 web,中文质量低但能用
+  - name: brave
+    engine: brave
+    shortcut: brave
+    categories: [general]
+    disabled: false
+    brave_category: search
+    # brave 标准版,无 token;Accept-Language 自动跟随 SearXNG locale
+
+  # ===== 中国本地化(中国 EDR 厂商新闻唯一本地源) =====
+  # chinaso:中国搜索,只 news 类别(URL 隐私问题官方警告)
+  - name: chinaso news
+    engine: chinaso
+    shortcut: chinaso
+    categories: [news]
+    disabled: false
+    chinaso_news_source: all
+    # 官方默认 inactive: true(URL 隐私),显式启用
+    # 只用 news 类别 — 不返回真实 URL,只有 snippet
+    # EDR 调研:中国厂商(奇安信/深信服/亚信安全/360/安恒)的关键新闻源
+
+  # ===== 学术检索(EDR bypass / 技术研究) =====
   - name: arxiv
     engine: arxiv
-    disabled: false
     shortcut: arx
-    categories: [general]
-  - name: github
-    engine: github
+    categories: [general, science]
     disabled: false
-    shortcut: gh
-    categories: [general]
+    # 学术论文库,EDR bypass / 检测算法对比论文多
+    # 无 token;偶尔 arxiv 限流(临时抖动,会恢复)
+
+  - name: openalex
+    engine: openalex
+    shortcut: oa
+    categories: [science]
+    disabled: false
+    # 200M 论文索引,比 arxiv 覆盖更广
+    # 2025 厂商技术报告 / 白皮书 / 学术综述均收录
+    # 推荐加 mailto:进 polite pool,本配置暂不加
+    timeout: 10.0
+
+  - name: semantic scholar
+    engine: semantic_scholar
+    shortcut: se
+    categories: [science]
+    disabled: false
+    # AI 驱动学术检索,200M 论文
+    # EDR 安全研究 / 综述论文
+
+  - name: pubmed
+    engine: pubmed
+    shortcut: pub
+    categories: [science]
+    disabled: false
+    # 备用 — EDR 不直接相关,但生物医学文献搜索强
+    # 39M+ 引用
+
+  # ===== 基础常识 / 厂商元数据 =====
   - name: wikipedia
     engine: wikipedia
-    disabled: false
     shortcut: wp
     categories: [general]
-  - name: openstreetmap
-    engine: openstreetmap
     disabled: false
-    shortcut: osm
+    # 关键:语言匹配 SearXNG locale(默认 zh/en 都查)
+    # EDR 等专有词条不在,但通用词条命中
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
     categories: [general]
+    disabled: false
+    # 厂商元数据:成立时间/总部/CEO/员工数/子公司
+    # 用 P31 (instance of) / P17 (country) 等关联查询
+    # EDR 厂商基本信息结构化检索
 
 doi_resolvers:
   oadoi.org: https://api.oadoi.org/
