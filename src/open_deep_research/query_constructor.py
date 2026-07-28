@@ -699,8 +699,32 @@ def apply_to_search_query(
         "categories": intent.categories,
         "language": intent.language,
     }
+    # P4 fix: SearXNG with time_range='year' returns 0 results across the
+    # board (independent of language / engines) — verified by curl probes:
+    #   language=auto + engines=bing + time_range=year  → 0 results
+    #   language=auto + engines=bing + (no time_range)  → 10 results
+    #   language=en   + engines=bing,wikipedia + time_range=year → 0 results
+    #   language=en   + engines=bing,wikipedia + (no time_range) → 10 results
+    # 'month' and 'day' work fine for narrow queries; only 'year' is broken.
+    # Auto-drop time_range='year' unconditionally so result counts recover.
+    # (Bug surfaced by EDR brief v3 run: market_size/adoption/regulation
+    #  sub_topics returned 0 EU — root cause was this 0-result fetch.)
     if intent.time_range is not None:
-        extras["time_range"] = intent.time_range
+        # Drop time_range if it's 'year' (always) OR if it's 'zh-CN + non-news
+        # engines' (the original P3 case — kept for backwards compat).
+        engines_set = set(intent.engines or [])
+        news_capable = bool(engines_set & {"bing_news", "chinaso news", "google news", "duckduckgo news"})
+        if intent.time_range == "year":
+            logger.warning(
+                "dropping time_range=year for SearXNG (time_range=year returns 0 results regardless of language/engines)"
+            )
+        elif intent.language == "zh-CN" and not news_capable:
+            logger.warning(
+                "dropping time_range=%s for SearXNG (zh-CN + non-news engines = 0 results)",
+                intent.time_range,
+            )
+        else:
+            extras["time_range"] = intent.time_range
 
     return SearchQuery(
         queries=list(intent.queries),

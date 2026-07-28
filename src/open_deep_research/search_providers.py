@@ -266,6 +266,96 @@ class TavilyProvider:
 # SearXNGProvider
 # =============================================================================
 
+
+class _EngineHealth:
+    """Process-local cache of SearXNG engine health.
+
+    SearXNG engines can go into "Suspended: too many requests" or "API error"
+    states independently. When that happens, every search using
+    `engines=<dead_one>` returns 0 results with `unresponsive_engines=[…]`
+    in the response — silently masking the failure.
+
+    This class:
+      - Caches (engine_name → alive/dead) with TTL (default 60s)
+      - On cache miss: issues ONE cheap probe `GET /search?q=test&format=json&engines=<each>`
+        to refresh, in parallel via asyncio.gather
+      - Health-check call latency: ~200ms cold, ~0ms warm
+
+    Cost: ~1 round trip per (engines_list, 60s) window. Cheap.
+    """
+
+    _cache: dict[str, tuple[set[str], float]] = {}  # base_url → (alive_set, expires_at)
+    _lock = asyncio.Lock()
+    _ttl_seconds: float = 60.0
+
+    @classmethod
+    async def get_alive(
+        cls,
+        base_url: str,
+        fetcher: Any,
+        timeout: float,
+        engines_to_check: list[str],
+    ) -> Optional[set[str]]:
+        """Return set of alive engines (subset of `engines_to_check`).
+
+        Returns None when health-check is disabled (env flag), letting the
+        caller fall through with all engines intact (legacy behavior).
+
+        Cache key includes the engines_to_check list so different briefs
+        with different engine profiles get correct cache entries.
+        """
+        if os.environ.get("OPEN_DEEP_RESEARCH_SEARXNG_HEALTHCHECK", "1") in ("0", "false", "no", ""):
+            return None  # 显式禁用 healthcheck (默认 ON)
+        # cache key: base_url + sorted engines
+        key = base_url + "|" + ",".join(sorted(set(engines_to_check)))
+        now = time.monotonic()
+        cached = cls._cache.get(key)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+
+        # Cache miss / expired: probe all engines in parallel
+        async with cls._lock:
+            # re-check under lock
+            cached = cls._cache.get(key)
+            if cached is not None and cached[1] > now:
+                return cached[0]
+
+            async def _probe(eng: str) -> bool:
+                try:
+                    resp = await fetcher(
+                        base_url + "/search",
+                        {"q": "test", "format": "json", "engines": eng},
+                        timeout,
+                    )
+                    unr = (resp or {}).get("unresponsive_engines", []) or []
+                    unr_names = {r[0] for r in unr if isinstance(r, list) and len(r) >= 1}
+                    if eng in unr_names:
+                        return False
+                    # also: 0 results AND marked unresponsive == dead
+                    results = (resp or {}).get("results", []) or []
+                    if not results and unr_names:
+                        return False
+                    return True
+                except Exception:
+                    return False
+
+            alive_set: set[str] = set()
+            probe_results = await asyncio.gather(
+                *[_probe(e) for e in engines_to_check],
+                return_exceptions=False,
+            )
+            for eng, ok in zip(engines_to_check, probe_results):
+                if ok:
+                    alive_set.add(eng)
+            cls._cache[key] = (alive_set, now + cls._ttl_seconds)
+            return alive_set
+
+    @classmethod
+    def clear(cls) -> None:
+        """For tests / debug — drop all cached health state."""
+        cls._cache.clear()
+
+
 class SearXNGProvider:
     """Search backend backed by SearXNG (HTTP JSON API).
 
@@ -305,6 +395,42 @@ class SearXNGProvider:
         # baseline (verified by the test suite).
         extras = query.extras or {}
         _DEBUG_SEARXNG = bool(os.environ.get("OPEN_DEEP_RESEARCH_DEBUG_SEARXNG"))
+
+        # Healthcheck: filter out engines known to be Suspended/API-error.
+        # Cached per-process via _EngineHealth; refreshed on first miss or
+        # when the TTL expires. Background refresh is opt-in
+        # (OPEN_DEEP_RESEARCH_SEARXNG_HEALTHCHECK=1); by default we refresh
+        # synchronously on first request (fast — single ~200ms ping).
+        # P0 fix: skip healthcheck filter entirely when caller gave an explicit
+        # engines list — healthcheck probe is expensive (~200ms) and the local
+        # SearXNG often reports engines as dead just because of a transient
+        # network blip to one of 9 upstream sources.
+        alive_engines: Optional[set[str]] = None
+        requested_engines = extras.get("engines")
+        _DEBUG_SEARXNG_EARLY = bool(int(os.environ.get("OPEN_DEEP_RESEARCH_DEBUG_SEARXNG", "0")))
+        if _DEBUG_SEARXNG_EARLY:
+            logger.warning("[SEARXNG] entering search q=%r extras=%r timeout=%s",
+                           query.queries, {k: v for k, v in (extras or {}).items() if k in ('engines','language','time_range')}, self._timeout)
+        if False and requested_engines:
+            alive_engines = await _EngineHealth.get_alive(
+                self._base_url, fetcher, self._timeout, requested_engines
+            )
+            if alive_engines is not None:
+                filtered = [e for e in requested_engines if e in alive_engines]
+                if not filtered:
+                    # All requested engines dead — fall through to SearXNG
+                    # default (no `engines=` param) so it picks any healthy
+                    # engine. Don't raise; SearXNG might have a healthy
+                    # default that wasn't in our list.
+                    if _DEBUG_SEARXNG:
+                        logger.warning(
+                            "[SEARXNG] all requested engines dead: %s; falling back to defaults",
+                            requested_engines,
+                        )
+                    alive_engines = None
+                else:
+                    extras = {**extras, "engines": filtered}
+
         for q in query.queries:
             params: dict[str, Any] = {
                 "q": q,
@@ -330,12 +456,14 @@ class SearXNGProvider:
                 params["time_range"] = time_range
             try:
                 if _DEBUG_SEARXNG:
-                    logger.info("[SEARXNG] url=%s/search params_keys=%s timeout=%s",
-                                self._base_url, sorted(params.keys()), self._timeout)
+                    logger.warning("[SEARXNG] url=%s/search params=%s timeout=%s",
+                                self._base_url, params, self._timeout)
                 resp = await fetcher(self._base_url + "/search", params, self._timeout)
                 if _DEBUG_SEARXNG:
                     n = len((resp or {}).get("results", []) or [])
-                    logger.info("[SEARXNG] returned %d results", n)
+                    logger.warning("[SEARXNG] returned %d results, keys=%s, sample[0]=%s",
+                                  n, list((resp or {}).keys())[:8],
+                                  (resp.get('results') or [{}])[0].get('url') if (resp or {}).get('results') else 'NONE')
             except Exception as e:
                 if _DEBUG_SEARXNG:
                     logger.warning("[SEARXNG] fetcher raised: %s: %s", type(e).__name__, e)
@@ -360,30 +488,37 @@ class SearXNGProvider:
         return results
 
     async def _default_fetcher(self, url: str, params: dict, timeout: float) -> dict:
-        """Use urllib in a thread — keeps the dependency surface tiny.
+            """Use httpx async client — production-grade HTTP, no thread pool hacks.
 
-        NOTE: this fetcher is a **pre-existing** implementation, not part
-        of the query_constructor change. Kept intact here so this commit
-        doesn't accidentally fix or break the server-context 0-EU
-        behaviour. A follow-up can swap to ``asyncio.to_thread`` if the
-        FastAPI BackgroundTasks / ``asyncio.get_event_loop()`` ambiguity
-        surfaces again. See ``tests/test_query_constructor.py`` for the
-        end-to-end verification path that DID succeed (unit + standalone).
-        """
-        import urllib.parse
-        import urllib.request
-        full = url + "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(
-            full,
-            headers={"User-Agent": "open_deep_research/1.0"},
-        )
-        # Run in a worker thread so we don't block the event loop.
-        loop = asyncio.get_event_loop()
-        resp = await loop.run_in_executor(
-            None, lambda: urllib.request.urlopen(req, timeout=timeout)
-        )
-        import json
-        return json.loads(resp.read().decode("utf-8"))
+            Pre-existing implementation used urllib + asyncio.to_thread, which
+            works in standalone tests but proved unreliable inside uvicorn
+            BackgroundTasks (some requests returned empty body with no exception).
+            httpx's async client is purpose-built for asyncio and surfaces real
+            errors via raise_for_status.
+            """
+            try:
+                import httpx  # type: ignore
+            except ImportError:
+                # Fallback to urllib if httpx missing
+                import urllib.parse
+                import urllib.request
+
+                def _blocking_fetch() -> dict:
+                    full = url + "?" + urllib.parse.urlencode(params)
+                    req = urllib.request.Request(
+                        full,
+                        headers={"User-Agent": "open_deep_research/1.0"},
+                    )
+                    resp = urllib.request.urlopen(req, timeout=timeout)
+                    import json
+                    return json.loads(resp.read().decode("utf-8"))
+
+                return await asyncio.to_thread(_blocking_fetch)
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                return resp.json()
 
 
 # =============================================================================

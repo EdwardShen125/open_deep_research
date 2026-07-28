@@ -34,6 +34,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 from open_deep_research.planner_v2 import (
@@ -394,7 +396,25 @@ async def run_pipeline(
         # P1.2: 同时拿 eu_to_claim_id map 用于回填 evidence_unit.claim_id 字段
         try:
             if v2_eus:
-                result = build_claims_from_eus(v2_eus, return_eu_map=True)
+                # P3 fix: pass embeddings=vecs to merge_units so cosine-based dedup
+                # actually runs. Without this, build_claims_from_eus → merge_units
+                # skips all pairs (embeddings=None path), producing 100% singleton
+                # claims and forcing every EU to grade=D.
+                # Embeddings come from the in-memory v2_eus[i].embedding list
+                # populated at line 331 (embed_texts → hash/MiniLM).
+                vecs_for_merge: Optional[np.ndarray] = None
+                try:
+                    emb_lists = [vu.embedding for vu in v2_eus]
+                    if all(e is not None for e in emb_lists):
+                        vecs_for_merge = np.asarray(emb_lists, dtype=np.float32)
+                except Exception as emb_xfer_e:
+                    logger.warning(
+                        "Phase 3 merge embeddings transfer failed: %s; merge will 100%% singleton",
+                        emb_xfer_e,
+                    )
+                result = build_claims_from_eus(
+                    v2_eus, embeddings=vecs_for_merge, return_eu_map=True
+                )
                 if isinstance(result, tuple):
                     claims, eu_to_claim_id = result
                 else:

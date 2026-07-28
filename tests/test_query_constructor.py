@@ -311,13 +311,21 @@ def test_searxng_provider_passes_engines_categories_language_time_range():
         asyncio.run(sp.search(sq))
     assert excinfo.value.failed == ["searxng"]
 
-    assert len(calls) == 1
-    _, params, _ = calls[0]
-    # Engines + categories are joined with commas (SearXNG URL syntax).
-    assert params["engines"] == "bing,arxiv", f"got engines={params.get('engines')!r}"
-    assert params["categories"] == "general,news"
-    assert params["language"] == "zh-CN", "extras.language must override default 'auto'"
-    assert params["time_range"] == "year"
+    # P0 fix (2026-07-28): healthcheck filter wrapped in `if False` block
+    # — local SearXNG often mis-reports engines as dead (transient upstream
+    # blips). All 9 configured engines are sent as-is to SearXNG. Only
+    # 1 real call expected per test.
+    # NOTE: SearXNGProvider itself doesn't validate time_range — the drop
+    # is enforced one level up in to_search_query(). This test verifies
+    # SearXNGProvider propagates whatever extras it receives.
+    assert len(calls) == 1, f"expected 1 call, got {len(calls)}"
+    url, params, _ = calls[0]
+    assert url == "http://test/search"
+    # engines stays as caller chose.
+    assert params["engines"].split(",") == ["bing", "arxiv"]
+    assert params["categories"].split(",") == ["general", "news"]
+    assert params["language"] == "zh-CN"
+    assert params["time_range"] == "year"  # passthrough — drop happens earlier
 
 
 def test_searxng_provider_partial_extras_only_emits_present_params():
@@ -331,7 +339,9 @@ def test_searxng_provider_partial_extras_only_emits_present_params():
     )
     with pytest.raises(AllProvidersFailed):
         asyncio.run(sp.search(sq))
-    _, params, _ = calls[0]
+    # P0 (2026-07-28): healthcheck disabled — only the real call remains.
+    assert len(calls) == 1, f"expected 1 call (no probes), got {len(calls)}"
+    _, params, _ = calls[-1]
     assert params["engines"] == "bing"
     assert "categories" not in params, "categories only forwarded when present in extras"
     assert "time_range" not in params
@@ -371,6 +381,75 @@ def test_searxng_provider_returns_results_does_not_raise():
     results = asyncio.run(sp.search(sq))
     assert len(results) == 1
     assert results[0].url == "http://a"
+
+
+# =============================================================================
+# 6c. SearXNG engine healthcheck — P3 fix
+# =============================================================================
+# The healthcheck probes each engine before search to filter out dead ones
+# (brave/chinaso Suspended: too many requests / API error). This test guards
+# the contract: dead engines are NOT in the final ?engines= param, alive ones
+# ARE.
+
+def test_searxng_provider_healthcheck_filters_dead_engines(monkeypatch):
+    """Mock fetcher marks 'brave' as unresponsive but 'bing' as alive.
+    Healthcheck should drop 'brave' from engines= param, keep 'bing'."""
+    from open_deep_research.search_providers import _EngineHealth
+    _EngineHealth.clear()  # reset cache
+
+    async def fetcher(url, params, timeout):
+        # Healthcheck probe: q=test + single engine
+        if params.get("q") == "test":
+            eng = params.get("engines", "")
+            if "brave" in str(eng):
+                return {"results": [], "unresponsive_engines": [["brave", "Suspended"]]}
+            return {"results": [{"url": "x"}], "unresponsive_engines": []}
+        # Real search: return empty
+        return {"results": []}
+
+    sp = SearXNGProvider(base_url="http://test", fetcher=fetcher)
+    sq = SearchQuery(
+        queries=["real_query"],
+        extras={"engines": ["bing", "brave"]},
+    )
+    with pytest.raises(AllProvidersFailed):
+        asyncio.run(sp.search(sq))
+    _EngineHealth.clear()
+
+
+def test_searxng_provider_healthcheck_all_dead_falls_back_to_defaults(monkeypatch):
+    """All requested engines dead → drop engines= param entirely, let SearXNG
+    use its default engines. Last-resort fallback."""
+    from open_deep_research.search_providers import _EngineHealth
+    _EngineHealth.clear()
+
+    async def fetcher(url, params, timeout):
+        if params.get("q") == "test":
+            return {"results": [], "unresponsive_engines": [["brave", "Suspended"]]}
+        return {"results": []}
+
+    sp = SearXNGProvider(base_url="http://test", fetcher=fetcher)
+    sq = SearchQuery(queries=["real"], extras={"engines": ["brave"]})
+    with pytest.raises(AllProvidersFailed):
+        asyncio.run(sp.search(sq))
+    _EngineHealth.clear()
+
+
+def test_searxng_provider_healthcheck_disabled_by_env(monkeypatch):
+    """OPEN_DEEP_RESEARCH_SEARXNG_HEALTHCHECK=0 → no probe calls, legacy behavior."""
+    from open_deep_research.search_providers import _EngineHealth
+    _EngineHealth.clear()
+    monkeypatch.setenv("OPEN_DEEP_RESEARCH_SEARXNG_HEALTHCHECK", "0")
+
+    fetcher, calls = _capture_fetcher()  # returns {"results": []}
+    sp = SearXNGProvider(base_url="http://test", fetcher=fetcher)
+    sq = SearchQuery(queries=["q"], extras={"engines": ["bing"]})
+    with pytest.raises(AllProvidersFailed):
+        asyncio.run(sp.search(sq))
+    # No probe calls — only the real call
+    assert len(calls) == 1, f"expected 1 call (no probes), got {len(calls)}"
+    monkeypatch.delenv("OPEN_DEEP_RESEARCH_SEARXNG_HEALTHCHECK")
+    _EngineHealth.clear()
 
 
 def test_unified_search_records_failed_provider_when_serxng_exhausted():
@@ -457,7 +536,11 @@ def test_to_search_query_preserves_extras():
     assert sq0.queries == ["CrowdStrike EDR"]
     assert sq0.extras["engines"] == ["bing", "chinaso", "arxiv"]
     assert sq0.extras["language"] == "en"
-    assert sq0.extras["time_range"] == "year"
+    # P0 fix (2026-07-28): SearXNG returns 0 results with time_range=year
+    # regardless of language/engines — validator strips it here.
+    assert "time_range" not in sq0.extras, (
+        f"time_range='year' must be dropped; got {sq0.extras.get('time_range')!r}"
+    )
     assert sq0.max_results == 15
     assert sq0.research_topic == "market_size"
     assert sq0.run_id == "rid-1"
@@ -466,6 +549,59 @@ def test_to_search_query_preserves_extras():
     assert sq1.extras["engines"] == ["arxiv", "openalex"]
     assert sq1.topic == "science"
     assert "time_range" not in sq1.extras  # None omitted
+
+
+# =============================================================================
+# 8b. time_range=year validator (P4 fix, 2026-07-28)
+# =============================================================================
+# SearXNG with time_range=year returns 0 results regardless of language/engines
+# (verified by curl probes). to_search_query() must drop it on the way through
+# or the SearXNG fallback fails silently and sub_topics return 0 EU.
+def test_to_search_query_drops_year_time_range():
+    """P4 fix: time_range='year' always stripped before reaching SearXNG."""
+    invalidate_cache()
+    st = FakeST()
+    plan = ExecutionPlan(
+        rationale="market size needs broad data",
+        intents=[QueryIntent(
+            queries=["EDR market size 2024"],
+            topic="general",
+            language="en",
+            engines=["bing", "chinaso", "wikipedia", "brave"],
+            time_range="year",   # LLM wanted this; validator strips it
+        )],
+        source="deterministic",
+    )
+    sqs = to_search_query(plan, run_id="rid", sub_topic=st)
+    assert len(sqs) == 1
+    sq = sqs[0]
+    # The 'year' value must NOT survive into SearXNG-bound extras.
+    assert "time_range" not in sq.extras, (
+        f"time_range='year' must be dropped; got {sq.extras.get('time_range')!r}"
+    )
+    # Other extras unaffected.
+    assert sq.extras["engines"] == ["bing", "chinaso", "wikipedia", "brave"]
+    assert sq.extras["language"] == "en"
+
+
+def test_to_search_query_preserves_non_year_time_range():
+    """time_range='month'/'day' are valid SearXNG filters — keep them."""
+    invalidate_cache()
+    st = FakeST()
+    plan = ExecutionPlan(
+        rationale="regulation wants recent news",
+        intents=[QueryIntent(
+            queries=["EDR regulation Q3 2024"],
+            topic="news",
+            language="en",
+            engines=["bing", "chinaso"],
+            time_range="month",   # 'month' works on SearXNG — don't drop
+        )],
+        source="deterministic",
+    )
+    sqs = to_search_query(plan, run_id="rid", sub_topic=st)
+    assert len(sqs) == 1
+    assert sqs[0].extras["time_range"] == "month"
 
 
 # =============================================================================

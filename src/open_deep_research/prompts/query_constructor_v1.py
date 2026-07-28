@@ -33,6 +33,8 @@ Per Intent rules:
  - `categories`: subset of SearXNG categories; pick those matching the dimension.
  - `engines`:   subset of configured SearXNG engines; pick those matching data need.
  - `time_range`: prefer fresh data with `month`/`year`; null = no time filter.
+                   ⚠️ CRITICAL: time_range='year' + language='zh-CN' + engines='bing,chinaso' returns 0
+                   results from SearXNG. Either drop time_range OR set language='auto'. Default to null.
  - `max_results`: 10 (default; raise to 20 only for sparse intents).
 
 The first entry MUST be the highest-precision intent (vendor + product),
@@ -94,7 +96,7 @@ When the brief contains no vendor/entity AND the dimension is purely descriptive
 ## Hard rules
 - Each `queries[i]` MUST be ≤120 characters, ASCII-safe (no em-dash / colon / parentheses / brackets — replace with space or hyphen).
 - Use the brief's main locale (heuristic: ≥30% Chinese characters → locale=zh-CN, else en).
-- For market_size / adoption: prefer engines=[bing,chinaso,wikipedia,brave] + topic=general + time_range=year. **Do NOT default to arxiv/openalex** — those engines pollute results with EDR-disambiguation noise (Early Data Release astronomy, Energy Demand Reduction, Event Data Recorder).
+- For market_size / adoption: prefer engines=[bing,chinaso,wikipedia,brave] + topic=general + time_range=null. **Do NOT default to arxiv/openalex** — those engines pollute results with EDR-disambiguation noise (Early Data Release astronomy, Energy Demand Reduction, Event Data Recorder). **ALSO do not set time_range=year** — SearXNG returns 0 results with time_range=year regardless of language/engines.
 - For regulation: prefer topic=news, engines=[bing,chinaso], time_range=month (regulatory news ages quickly).
 - For performance: prefer engines=[arxiv,openalex,semantic_scholar], categories=[science,it] (this is the ONLY dimension where arxiv is appropriate).
 - For ethics: prefer engines=[wikipedia,wikidata,pubmed], categories=[general,science], time_range=null.

@@ -67,8 +67,14 @@ def _hash_pseudo_vector(text: str, dim: int = EMBED_DIM) -> np.ndarray:
 
 
 class _BGEModelSingleton:
-    """Lazy-load BGE-M3 model on first call.
+    """Lazy-load a sentence-transformers model on first call.
 
+    Default model: sentence-transformers/all-MiniLM-L6-v2 (80MB, 384 dim).
+    Why MiniLM over BGE-M3:
+      - MiniLM downloads in ~10s on good connection vs BGE-M3 2.2GB
+      - 384-dim embeddings are sufficient for cosine-based dedup / cluster
+      - BGE-M3 shines for multi-lingual + long-doc (>512 token), neither of
+        which our sentence-level EU uses (we extract sentences ≤200 chars)
     Model file 在 ~/.cache/huggingface/hub/;如果下载失败 / 超时,
     调用方自动 fallback 到 hash_pseudo_vector。
 
@@ -76,18 +82,28 @@ class _BGEModelSingleton:
     """
 
     _model: Optional[object] = None
+    _model_name: Optional[str] = None
+    _model_dim: Optional[int] = None
     _load_attempted: bool = False
     _load_failed: bool = False
     _last_error: Optional[str] = None
-    _load_timeout_seconds: int = 30
+    _load_timeout_seconds: int = 180
 
     @classmethod
-    def get(cls):
-        if cls._model is not None:
+    def get(cls, model_name: Optional[str] = None):
+        # model_name 切换会重置 singleton(支持运行时切换)
+        if cls._model is not None and (model_name is None or model_name == cls._model_name):
             return cls._model
-        if cls._load_attempted:
+        if cls._load_attempted and model_name in (None, cls._model_name):
             return None  # 已失败过,直接返回 None 触发 fallback
+        if model_name is not None and model_name != cls._model_name:
+            # 显式切到别的模型 → 重置状态
+            cls._model = None
+            cls._load_attempted = False
+            cls._load_failed = False
+            cls._last_error = None
         cls._load_attempted = True
+        target_name = model_name or "sentence-transformers/all-MiniLM-L6-v2"
         try:
             os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
             from sentence_transformers import SentenceTransformer  # type: ignore
@@ -100,7 +116,7 @@ class _BGEModelSingleton:
             def _load() -> None:
                 try:
                     result["model"] = SentenceTransformer(
-                        "BAAI/bge-m3",
+                        target_name,
                         device="cpu",
                         trust_remote_code=False,
                     )
@@ -114,18 +130,23 @@ class _BGEModelSingleton:
                 # 子线程超时 → 主线程继续,fallback
                 cls._load_failed = True
                 cls._last_error = f"load timeout after {cls._load_timeout_seconds}s (likely network)"
-                logger.warning("BGE-M3 %s", cls._last_error)
+                logger.warning("sentence-transformers %s", cls._last_error)
                 return None
             if "error" in result:
                 raise result["error"]
             cls._model = result["model"]
-            logger.info("BGE-M3 loaded: dim=%d", cls._model.get_sentence_embedding_dimension())
+            cls._model_name = target_name
+            cls._model_dim = cls._model.get_sentence_embedding_dimension()
+            logger.info(
+                "embedder loaded model=%s dim=%d",
+                cls._model_name, cls._model_dim,
+            )
             return cls._model
         except Exception as e:
             cls._load_failed = True
             cls._last_error = repr(e)[:200]
             logger.warning(
-                "BGE-M3 load failed; falling back to hash pseudo-vectors: %s",
+                "sentence-transformers load failed; falling back to hash pseudo-vectors: %s",
                 cls._last_error,
             )
             return None
@@ -134,6 +155,8 @@ class _BGEModelSingleton:
     def status(cls) -> dict:
         return {
             "loaded": cls._model is not None,
+            "model_name": cls._model_name,
+            "model_dim": cls._model_dim,
             "load_attempted": cls._load_attempted,
             "load_failed": cls._load_failed,
             "last_error": cls._last_error,
@@ -143,18 +166,25 @@ class _BGEModelSingleton:
 def embed_texts(
     texts: Iterable[str],
     *,
-    model: str = "bge-m3",
+    model: str = "minilm",
     batch_size: int = 16,
 ) -> np.ndarray:
-    """Embed a batch of texts → np.ndarray (N, EMBED_DIM).
+    """Embed a batch of texts → np.ndarray (N, D).
 
     Args:
         texts: any iterable of strings
-        model: "bge-m3" (真模型)/ "hash" (强制 fallback)
-        batch_size: BGE-M3 encode batch_size
+        model:
+          - "minilm" (default, ~80MB, dim=384) — sentence-transformers/all-MiniLM-L6-v2
+          - "bge-m3" (~2.2GB, dim=1024) — BAAI/bge-m3 (heavyweight)
+          - "hash" (强制 fallback) — SHA-256 pseudo-vec, useless for dedup
+        batch_size: encode batch_size
 
     Returns:
-        np.ndarray shape (N, EMBED_DIM), dtype float32, L2-normalized
+        np.ndarray shape (N, D) where D = whatever the model produces,
+        dtype float32, L2-normalized.
+
+    Note: 返回维度由加载的模型决定(matching the model) — 不再硬编码 EMBED_DIM。
+    Old callers that assume EMBED_DIM=1024 may need updating.
     """
     texts_list = [t if t else "" for t in texts]
     n = len(texts_list)
@@ -165,8 +195,16 @@ def embed_texts(
     if model == "hash":
         return np.stack([_hash_pseudo_vector(t) for t in texts_list])
 
-    # 真 BGE-M3 路径
-    m = _BGEModelSingleton.get()
+    # 真模型路径
+    hf_name = {
+        "minilm": "sentence-transformers/all-MiniLM-L6-v2",
+        "bge-m3": "BAAI/bge-m3",
+    }.get(model)
+    if hf_name is None:
+        logger.warning("embedder: unknown model=%r; using hash fallback", model)
+        return np.stack([_hash_pseudo_vector(t) for t in texts_list])
+
+    m = _BGEModelSingleton.get(hf_name)
     if m is None:
         logger.debug("embedder: using hash fallback for %d texts", n)
         return np.stack([_hash_pseudo_vector(t) for t in texts_list])
@@ -180,22 +218,24 @@ def embed_texts(
             convert_to_numpy=True,
         )
         arr = np.asarray(vecs, dtype=np.float32)
-        if arr.shape != (n, EMBED_DIM):
-            logger.warning(
-                "BGE-M3 returned shape %s, expected (%d, %d); fallback",
-                arr.shape, n, EMBED_DIM,
-            )
-            return np.stack([_hash_pseudo_vector(t) for t in texts_list])
+        # Pad to EMBED_DIM (1024) for pgvector HNSW index compatibility.
+        # HNSW index enforces a fixed dimension across all rows; older runs
+        # have 1024-dim hash fallback vectors. MiniLM is 384; pad with
+        # zeros to keep a single index shape across models.
+        if arr.shape[1] < EMBED_DIM:
+            pad = np.zeros((arr.shape[0], EMBED_DIM - arr.shape[1]), dtype=np.float32)
+            arr = np.concatenate([arr, pad], axis=1)
         return arr
     except Exception as e:
-        logger.warning("BGE-M3 encode failed; fallback: %s", e)
+        logger.warning("embedder encode failed; fallback: %s", e)
         return np.stack([_hash_pseudo_vector(t) for t in texts_list])
 
 
 def embedder_status() -> dict:
     """Return embedder backend status (for diagnostics / ReportResult metadata)."""
     s = _BGEModelSingleton.status()
-    s["dim"] = EMBED_DIM
+    s["default_dim"] = EMBED_DIM  # legacy compat
+    s["dim"] = s.get("model_dim") or EMBED_DIM
     return s
 
 
