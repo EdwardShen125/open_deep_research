@@ -94,13 +94,15 @@ When the brief contains no vendor/entity AND the dimension is purely descriptive
 ## Hard rules
 - Each `queries[i]` MUST be ≤120 characters, ASCII-safe (no em-dash / colon / parentheses / brackets — replace with space or hyphen).
 - Use the brief's main locale (heuristic: ≥30% Chinese characters → locale=zh-CN, else en).
-- For market_size / adoption: prefer engines=[bing,chinaso,wikidata] + topic=general + time_range=year.
+- For market_size / adoption: prefer engines=[bing,chinaso,wikipedia,brave] + topic=general + time_range=year. **Do NOT default to arxiv/openalex** — those engines pollute results with EDR-disambiguation noise (Early Data Release astronomy, Energy Demand Reduction, Event Data Recorder).
 - For regulation: prefer topic=news, engines=[bing,chinaso], time_range=month (regulatory news ages quickly).
-- For performance: prefer engines=[arxiv,openalex,semantic_scholar], categories=[science,it].
+- For performance: prefer engines=[arxiv,openalex,semantic_scholar], categories=[science,it] (this is the ONLY dimension where arxiv is appropriate).
 - For ethics: prefer engines=[wikipedia,wikidata,pubmed], categories=[general,science], time_range=null.
-- For context (dimension_id is None): broader sweep, topic=general, engines=[bing,arxiv,wikipedia].
-- Always include at least one academic engine (arxiv OR openalex) — context worth surfacing even for vendor questions.
-- `max_results` default 10; raise to 20 ONLY if engines list is short (<3) and topic needs breadth.
+- For context (dimension_id is None): broader sweep, topic=general, engines=[bing,chinaso,wikipedia,brave].
+- When the brief contains Chinese EDR vendor names (奇安信/360/深信服/绿盟/启明星辰/天融信/安恒) OR ≥30% CJK chars, you MUST emit a SECOND intent that uses `site:` operators to constrain to CN vendor domains:
+  - `site:qihoo.com OR site:360.cn OR site:sangfor.com OR site:nsfocus.com OR site:dbappsecurity.com.cn OR site:venustech.com.cn OR site:qax.com.cn OR site:qianxin.com OR site:topsec.com.cn OR site:dbcloud.com.cn`
+  - engines for the vendor intent: bing, chinaso, brave (NOT arxiv).
+- DO NOT include arxiv OR openalex unless the dimension is performance OR the query is purely descriptive academic research.
 
 ## Output contract
 - Return ONLY the JSON object. No markdown fences. No commentary.

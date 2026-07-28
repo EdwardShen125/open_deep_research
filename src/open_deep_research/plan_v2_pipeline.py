@@ -276,11 +276,14 @@ async def run_pipeline(
             #     dedup is internal to the extractor + EU DAO).
             if not raws:
                 continue
+            # P1 fix: pass the original brief as `research_topic` so the cyber
+            # guard (cybersecurity-context keyword filter) can enable itself.
+            # Passing `st.title` (e.g. "market_size") defeats the guard.
             eus = extract_from_search_results(
                 raws,
                 run_id=rid,
                 sources_dao=sources_dao,
-                research_topic=st.title,
+                research_topic=query,           # was st.title — guard was disabled
                 dimension_id=st.dimension_id,
             )
             all_eus.extend(eus)

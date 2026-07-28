@@ -258,6 +258,70 @@ def _confidence_for(text: str, *, page_level: bool) -> float:
 # Extraction entry point
 # =============================================================================
 
+# P1: keyword guard — drop EU whose claim lacks cybersecurity context when the
+# research topic is cyber-related. Without this, arxiv hits on "EDR" (Early
+# Data Release / Energy Demand Reduction / Event Data Recorder) pollute the
+# report with irrelevant astronomy / energy / medical abstracts.
+#
+# Cheap heuristic: claim.lower() must contain at least one of these tokens
+# OR source domain is a known vendor. Set conservatively (small blacklist)
+# to avoid dropping legitimate content. When research_topic is None or
+# non-cyber, the guard is disabled.
+
+_CYBER_CONTEXT_TOKENS = frozenset({
+    # Cybersecurity-specific (excludes generic "endpoint" which astronomy
+    # also uses). The guard aims to filter arxiv's EDR-disambiguation noise
+    # (Early Data Release astronomy papers) without dropping genuine EDR
+    # vendor pages.
+    "endpoint detection", "endpoint protection", "endpoint security",
+    "endpoint detection and response",
+    "cybersecurity", "cyber security", "cyber-security",
+    "malware", "ransomware",
+    "antivirus", "anti-virus", "antimalware", "anti-malware",
+    "intrusion detection", "intrusion prevention",
+    "threat detection", "threat hunting", "threat intelligence",
+    "incident response", "siem", "soar",
+    "zero-day", "zero day", "exploit kit", "lateral movement",
+    # The EDR-cyber disambiguation: 'EDR' alone (without surrounding astronomy
+    # context like 'quasar', 'redshift', 'pipeline') is cybersecurity
+    "edr",
+    # Vendor names (canonical & alternate)
+    "crowdstrike", "sentinelone", "carbon black", "mcafee", "symantec",
+    "trend micro", "kaspersky", "palo alto", "cortex", "defender", "sentinel",
+    "fireeye", "mandiant", "rapid7", "tanium", "carbonblack",
+    "cylance", "bitdefender", "sophos",
+    # Chinese
+    "终端检测与响应", "终端安全", "终端检测", "终端防护",
+    "恶意软件", "勒索软件", "勒索病毒", "木马病毒",
+    "病毒防护", "病毒检测", "入侵检测", "威胁检测",
+    "奇安信", "深信服", "绿盟科技", "启明星辰", "天融信", "安恒信息",
+    "网安", "网络安全", "信息安全",
+})
+
+# Research-topic tokens that ENABLE the guard (i.e. the brief IS about
+# cybersecurity). Without these tokens the guard is a no-op.
+_CYBER_TOPIC_TOKENS = frozenset({
+    "edr", "endpoint", "xdr", "cybersecurity", "cyber security",
+    "antivirus", "antimalware", "malware", "ransomware",
+    "终端", "终端安全", "网络安全", "网安", "信息安全",
+    "endpoint detection", "endpoint protection", "threat detection",
+})
+
+
+def _has_cyber_context(text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    return any(tok in low for tok in _CYBER_CONTEXT_TOKENS)
+
+
+def _topic_is_cyber(research_topic: Optional[str]) -> bool:
+    if not research_topic:
+        return False
+    low = research_topic.lower()
+    return any(tok in low for tok in _CYBER_TOPIC_TOKENS)
+
+
 def extract_from_search_result(
     result: dict[str, Any],
     *,
@@ -265,21 +329,45 @@ def extract_from_search_result(
     sources_dao: Any = None,
     research_topic: Optional[str] = None,
     dimension_id: Optional[str] = None,
+    cyber_guard: bool = True,
 ) -> list[EvidenceUnit]:
     """Convert one Tavily/SearXNG search result dict to one or more EUs.
 
     `result` keys used: 'url' (required), 'title', 'content' / 'summary',
     'raw_content' (preferred for full text), 'score'.
 
-    Returns the list of new EUs (deduped by content_hash). If `sources_dao`
-    is provided, the source row is registered first so the page-level flag
-    is sourced from PG.
+    P1 fix: when `cyber_guard=True` (default) AND `research_topic` looks
+    cyber-focused, drop EUs whose claim + title lack cybersecurity context.
+    This is the cheap heuristic that filters arxiv's EDR-disambiguation
+    pollution (Early Data Release / Energy Demand Reduction / medical
+    abstracts with the token "EDR").
+
+    Returns the list of new EUs (deduped by content_hash). If `sources_dao` is
+    provided, the source row is registered first so the page-level flag is
+    sourced from PG.
     """
     url = result.get("url")
     if not url:
         return []
-    title = result.get("title")
+    title = result.get("title") or ""
     score = result.get("score")
+
+    # P1: short-circuit for sources known to be EDR vendors. The brief
+    # explicitly asks about Chinese / US EDR vendors, so any qihoo / sangfor /
+    # crowdstrike / sentinelone / microsoft.com hit MUST be kept — the guard
+    # would otherwise drop vendor pages whose claim may be generic product copy.
+    host = (urlsplit(url).hostname or "").lower()
+    _VENDOR_HOST_FRAGMENTS = (
+        "qihoo", "360.cn", "sangfor", "nsfocus", "dbappsecurity",
+        "venustech", "qax.com", "qianxin", "topsec", "dbcloud",
+        "crowdstrike", "sentinelone", "carbonblack", "mcafee", "symantec",
+        "trendmicro", "kaspersky", "paloalto", "paloaltonetworks",
+        "microsoft.com", "intune.microsoft", "fireeye", "mandiant",
+        "rapid7", "tanium", "cylance", "bitdefender", "sophos",
+        "checkpoint", "fortinet", "cisco.com",
+    )
+    is_vendor_host = any(frag in host for frag in _VENDOR_HOST_FRAGMENTS)
+    guard_active = cyber_guard and _topic_is_cyber(research_topic) and not is_vendor_host
 
     # 1. Source registration (idempotent — DAO upserts by url_hash)
     source_id: Optional[int] = None
@@ -324,6 +412,15 @@ def extract_from_search_result(
     # P0 source_tier 真实分级: 一次分类,所有 sentence EU 共享
     src_tier = _classify_source_tier(url)
     for sent in sentences:
+        # P1 guard: drop sentences without cybersecurity context when the
+        # brief is cyber-focused. arxiv / doi.org pages on Early Data Release,
+        # Energy Demand Reduction, Event Data Recorder are the prime offenders.
+        # We check ONLY the claim (not the title) because astronomy paper titles
+        # like "Improved Redshifts for DESI EDR Quasars" contain "EDR" but the
+        # sentences don't say anything about cybersecurity. The vendor-host
+        # short-circuit above already preserves legitimate vendor pages.
+        if guard_active and not _has_cyber_context(sent):
+            continue
         quote = (sent[:200] + "…") if len(sent) > 200 else sent
         nums = extract_numbers(sent)
         ents = mine_entities(sent)

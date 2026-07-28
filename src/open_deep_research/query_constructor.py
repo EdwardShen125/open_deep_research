@@ -96,6 +96,82 @@ SearXNG_CONFIGURED_ENGINES = frozenset({
 })
 
 
+# =============================================================================
+# P2: Chinese EDR vendor site: whitelist
+# =============================================================================
+# Why: EDR market research for Chinese vendors (Qihoo 360 / Sangfor / NSFOCUS /
+# DBAPP / Venustech / Qi An Xin / Topsec / Nsfocus / DBCloud) is dominated by
+# academic arxiv hits when using general engines. Injecting `site:` operators
+# forces SearXNG to surface vendor-domain content — arxiv alone cannot answer
+# "what is X product roadmap in 2024".
+#
+# Applied as a SECONDARY intent so the LLM-driven primary intent still works
+# freely; the whitelist ensures the brief gets at least one vendor-source hit.
+# We auto-trigger on Chinese locale (≥30% CJK chars in brief) OR explicit
+# vendor tokens in the brief (case-insensitive).
+
+CN_EDR_VENDOR_DOMAINS = frozenset({
+    # Curated short list — site: queries must fit in ≤120 chars combined
+    # with the base token(s). Keep ≤6 to stay under SearXNG URL limit.
+    "qihoo.com",
+    "sangfor.com",
+    "nsfocus.com",
+    "qax.com.cn",
+    "qianxin.com",
+    "venustech.com.cn",
+})
+
+_VENDOR_NAME_TOKENS = (
+    "qihoo", "奇安信", "qianxin", "sangfor", "深信服", "nsfocus", "绿盟",
+    "dbappsecurity", "dbapp", "安恒", "venustech", "启明星辰", "topsec",
+    "360", "天融信", "天融信", "奇安信",
+)
+
+
+def _brief_is_chinese_cyber(brief: str) -> bool:
+    """Return True if brief looks Chinese-cyber-market focused.
+
+    Triggers site: whitelist injection when ANY of:
+      - ≥30% CJK characters in the brief (CN locale)
+      - explicit CN vendor tokens appear
+      - keywords: '厂商' / '中国' / '国内' / '本土' / '本土厂商'
+    """
+    if not brief:
+        return False
+    cn = sum(1 for ch in brief if "\u4e00" <= ch <= "\u9fff")
+    if cn / max(1, len(brief)) >= 0.30:
+        return True
+    if any(tok in brief for tok in _VENDOR_NAME_TOKENS):
+        return True
+    if any(kw in brief for kw in ("厂商", "中国", "国内", "本土")):
+        return True
+    return False
+
+
+def _vendor_site_query(brief: str, sub_topic_question: str) -> str:
+    """Build a SearXNG query that constrains results to CN vendor domains.
+
+    `SearXNG` understands `site:` natively; the result is one OR over our
+    whitelist domains with the brief's most distinctive tokens.
+
+    Examples:
+      _vendor_site_query("EDR ...", "EDR ... market size")
+        → '(EDR OR 终端安全) (site:qihoo.com OR site:sangfor.com OR ...)
+
+    """
+    base_tokens = []
+    for tok in ("EDR", "终端安全", "终端检测", "endpoint detection"):
+        if tok in brief or tok in sub_topic_question:
+            base_tokens.append(tok)
+    if not base_tokens:
+        base_tokens.append("EDR")
+    base_expr = " OR ".join(base_tokens[:3])
+    site_expr = " OR ".join(f"site:{d}" for d in sorted(CN_EDR_VENDOR_DOMAINS))
+    # Wrap each site: clause in parens so SearXNG parses as OR correctly
+    site_expr = f"({site_expr})"
+    return f"({base_expr}) {site_expr}"
+
+
 class QueryIntent(BaseModel):
     """One SearXNG search profile = one SearchQuery to issue."""
 
@@ -249,16 +325,25 @@ def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str
 
     Single source of truth — used both in deterministic fallback and to
     sanity-check LLM output (LLM overrides freely; we only fall back).
+
+    P0 fix: drop arxiv/openalex from the default engines for vendor /
+    market-research dimensions. Academic engines pollute results with
+    EDR-disambiguation noise (Early Data Release, Energy Demand Reduction,
+    Event Data Recorder) that has nothing to do with cybersecurity. The
+    academic engines are still allowed in LLM output but only when the
+    dimension is purely descriptive (performance / ethics).
     """
     if dimension_id == "market_size":
         return (
-            ["bing", "chinaso", "wikidata", "arxiv"],
+            # P0 fix: dropped arxiv/wikidata from primary; bing + chinaso +
+            # wikipedia cover vendor / news / market data; brave as fallback.
+            ["bing", "chinaso", "brave", "wikipedia"],
             ["general", "news"],
             "general",
         )
     if dimension_id == "adoption":
         return (
-            ["bing", "chinaso", "wikidata"],
+            ["bing", "chinaso", "brave"],
             ["general", "news"],
             "general",
         )
@@ -269,6 +354,7 @@ def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str
             "news",
         )
     if dimension_id == "performance":
+        # Pure technical/academic — keep arxiv/openalex here.
         return (
             ["arxiv", "openalex", "semantic_scholar"],
             ["science", "general"],
@@ -280,10 +366,10 @@ def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str
             ["general", "science"],
             "general",
         )
-    # Default / context — broader sweep.
+    # Default / context — broader sweep but bias toward news/vendor sources.
     return (
-        ["bing", "wikipedia", "arxiv"],
-        ["general"],
+        ["bing", "chinaso", "wikipedia", "brave"],
+        ["general", "news"],
         "general",
     )
 
@@ -297,25 +383,55 @@ def _deterministic_fallback(brief: str, sub_topic: Any) -> ExecutionPlan:
         still surfaces academic context (matches user's earlier diagnostic).
       - Locale-aware (zh-CN if brief is mostly Chinese).
       - dimension_id aware (engines/categories match dimension).
+      - P2 fix: when brief is Chinese-cyber focused, emit a SECOND intent that
+        constrains results to CN vendor domains (site:qihoo.com OR ...). This
+        compensates for arxiv dominating when no constraint is set.
     """
     locale = _detect_locale(brief)
     engines, categories, topic = _dimension_to_default_engines(getattr(sub_topic, "dimension_id", None))
     question = getattr(sub_topic, "question", "") or brief
     sanitized = _sanitize_query_for_searxng(question)
+
+    intents: list[QueryIntent] = [
+        QueryIntent(
+            queries=[sanitized],
+            topic=topic,
+            language=locale,
+            categories=categories,
+            engines=engines,
+            time_range=None,
+            max_results=10,
+            expected_yield="deterministic-best-effort",
+        ),
+    ]
+
+    # P2: Chinese-cyber brief → emit a secondary site:-constrained intent so
+    # SearXNG surfaces at least some CN vendor content. Without this, all
+    # EUs come from arxiv + doi.org which is the wrong source for market
+    # research (academic papers on "EDR" = Early Data Release / Energy
+    # Demand Reduction, NOT endpoint security).
+    if _brief_is_chinese_cyber(brief):
+        vendor_q = _vendor_site_query(brief, question)
+        # Skip _sanitize_query_for_searxng — `site:` operator requires colons,
+        # parens are needed for OR-grouping, and the query is hand-crafted.
+        # Truncate to 120 chars to stay within SearXNG's limit (we keep
+        # only the most important site: clauses if it overflows).
+        if len(vendor_q) > 120:
+            vendor_q = vendor_q[:120].rstrip()
+        intents.append(QueryIntent(
+            queries=[vendor_q],
+            topic="general",
+            language="zh-CN",
+            categories=["general", "news"],
+            engines=["bing", "chinaso", "brave"],
+            time_range=None,
+            max_results=15,
+            expected_yield="CN vendor site:-whitelist",
+        ))
+
     return ExecutionPlan(
         rationale="deterministic fallback (LLM failed or disabled)",
-        intents=[
-            QueryIntent(
-                queries=[sanitized],
-                topic=topic,
-                language=locale,
-                categories=categories,
-                engines=engines,
-                time_range=None,
-                max_results=10,
-                expected_yield="deterministic-best-effort",
-            ),
-        ],
+        intents=intents,
         source="deterministic",
     )
 
@@ -345,12 +461,18 @@ def _brief_hash(brief: str) -> str:
 
 
 def _sub_topic_hash(sub_topic: Any) -> str:
+    # P0 fix: parens around EVERY getattr call so the `or ""` fallbacks
+    # only apply to their own field, not silently consume the whole
+    # subsequent string concat via Python's higher-precedence `+`.
+    # Pre-fix bug: 3 distinct FakeST(title="performance", ...) instances
+    # all produced the same hash because their `id="st-fake"` was truthy
+    # and short-circuited the entire expression to just `"st-fake"`.
     seed = (
-        getattr(sub_topic, "id", "") or ""
+        (getattr(sub_topic, "id", "") or "")
         + "|"
-        + getattr(sub_topic, "title", "")
+        + (getattr(sub_topic, "title", "") or "")
         + "|"
-        + getattr(sub_topic, "question", "")
+        + (getattr(sub_topic, "question", "") or "")
         + "|"
         + (getattr(sub_topic, "dimension_id", "") or "")
     )

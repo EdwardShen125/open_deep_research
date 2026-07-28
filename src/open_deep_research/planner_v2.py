@@ -220,6 +220,10 @@ def plan_from_brief(
         clauses = _split_into_clauses(brief)
         if clauses and len(sub_topics) < max_subtopics:
             dep_ids = [s.id for s in sub_topics if s.id is not None]
+            # P3 fix: tag context sub_topic with explicit "context" dimension so
+            # EU persistence preserves provenance (was NULL → <unknown> in eu_stats).
+            # Note: this is NOT one of the 5 canonical dimensions; eu_stats will
+            # show "context" as a 6th bucket which is honest about origin.
             sub_topics.append(SubTopic(
                 title="context",
                 question=clauses[0],  # D: short verbatim query (no "context of:" wrapper)
@@ -229,7 +233,7 @@ def plan_from_brief(
                 expected_entities=_entities_in(clauses[0]),
                 expected_keywords=_keywords_in(clauses[0]),
                 rationale="establishes baseline across all dimensions",
-                dimension_id=None,  # context 不归属任何维度
+                dimension_id="context",  # P3 fix: was None — caused NULL dim_id in EU table
             ))
     else:
         # 旧 clause-based 行为,dimension_id 全 None

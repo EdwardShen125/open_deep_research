@@ -633,3 +633,85 @@ def test_query_constructor_to_searxng_regression(monkeypatch):
     )
     print(f"\n  ✓ live regression: {len(results)} results, "
           f"requested={sorted(requested)} got={sorted(engines_seen)}")
+
+
+# =============================================================================
+# P0/P1/P2/P3 regression tests — engine selection + vendor site whitelist
+# =============================================================================
+
+def test_deterministic_fallback_market_size_drops_arxiv():
+    """P0 fix: market_size default engines must NOT include arxiv/openalex
+    unless the brief explicitly wants academic sources. Academic engines
+    pollute results with EDR-disambiguation noise (Early Data Release,
+    Energy Demand Reduction, Event Data Recorder).
+    """
+    invalidate_cache()
+    from open_deep_research.query_constructor import _deterministic_fallback
+    st = FakeST(title="market_size", dimension_id="market_size", question="EDR market size")
+    plan = _deterministic_fallback("EDR market size US China", st)
+    primary_engines = set(plan.intents[0].engines)
+    assert "arxiv" not in primary_engines, f"arxiv leaked: {primary_engines}"
+    assert "openalex" not in primary_engines, f"openalex leaked: {primary_engines}"
+    assert "bing" in primary_engines, f"bing must be primary: {primary_engines}"
+    assert "chinaso" in primary_engines, f"chinaso must be primary for CN: {primary_engines}"
+
+
+def test_deterministic_fallback_performance_keeps_arxiv():
+    """P0 fix: the ONLY dimension that should still default to arxiv is performance.
+    Academic engines are appropriate there because performance comparisons
+    require peer-reviewed technical papers."""
+    invalidate_cache()
+    from open_deep_research.query_constructor import _deterministic_fallback
+    st = FakeST(title="performance", dimension_id="performance", question="EDR performance")
+    plan = _deterministic_fallback("EDR performance comparison", st)
+    primary_engines = set(plan.intents[0].engines)
+    assert "arxiv" in primary_engines, f"performance must keep arxiv: {primary_engines}"
+    assert "openalex" in primary_engines, f"performance must keep openalex: {primary_engines}"
+
+
+def test_deterministic_fallback_emits_vendor_intent_for_zh_brief():
+    """P2 fix: when brief is Chinese-cyber, emit a SECOND intent that constrains
+    results to CN vendor domains via site:qihoo.com OR site:sangfor.com etc.
+    Without this, arxiv dominates and Chinese EDR vendor sources (奇安信/360/
+    深信服/绿盟/启明星辰) get zero hits.
+    """
+    invalidate_cache()
+    from open_deep_research.query_constructor import _deterministic_fallback
+    st = FakeST(title="market_size", dimension_id="market_size", question="EDR 市场")
+    plan = _deterministic_fallback("EDR 中国和美国市场 产品竞品分析 现状研究和市场缺口分析", st)
+    # Expect 2 intents: primary + vendor site:-whitelist
+    assert len(plan.intents) >= 2, f"expected ≥2 intents, got {len(plan.intents)}"
+    vendor_intent = plan.intents[1]
+    assert any("site:qihoo.com" in q for q in vendor_intent.queries), (
+        f"vendor intent missing site:qihoo.com: {vendor_intent.queries}"
+    )
+    assert any("site:sangfor.com" in q for q in vendor_intent.queries), (
+        f"vendor intent missing site:sangfor.com: {vendor_intent.queries}"
+    )
+    assert vendor_intent.language == "zh-CN", f"vendor intent must be zh-CN: {vendor_intent.language}"
+
+
+def test_deterministic_fallback_no_vendor_intent_for_en_brief():
+    """P2 negative test: pure-English brief should NOT trigger vendor whitelist
+    (it would only add noise)."""
+    invalidate_cache()
+    from open_deep_research.query_constructor import _deterministic_fallback
+    st = FakeST(title="market_size", dimension_id="market_size", question="EDR market")
+    plan = _deterministic_fallback("EDR market US 2024", st)
+    # Only 1 intent expected — no CN vendor site:-whitelist
+    assert len(plan.intents) == 1, f"expected 1 intent for en brief, got {len(plan.intents)}"
+
+
+def test_sub_topic_hash_distinct_for_distinct_sub_topics():
+    """Regression: parens bug previously caused all FakeST instances to hash
+    the same because `id="st-fake"` was truthy and short-circuited the
+    expression `getattr(...) or "" + "|" + ...` to just the `id` string."""
+    invalidate_cache()
+    from open_deep_research.query_constructor import _sub_topic_hash
+    st_market = FakeST(title="market_size", dimension_id="market_size", question="EDR market")
+    st_perf = FakeST(title="performance", dimension_id="performance", question="EDR perf")
+    st_reg = FakeST(title="regulation", dimension_id="regulation", question="EDR reg")
+    h_market = _sub_topic_hash(st_market)
+    h_perf = _sub_topic_hash(st_perf)
+    h_reg = _sub_topic_hash(st_reg)
+    assert h_market != h_perf != h_reg, f"hashes must differ: {h_market} {h_perf} {h_reg}"

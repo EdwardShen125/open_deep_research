@@ -211,3 +211,126 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# =============================================================================
+# P1 regression tests — keyword guard for cyber-focused briefs
+# =============================================================================
+
+class TestCyberGuard:
+    """P1 fix: drop EU whose claim lacks cybersecurity context when the brief
+    is about cybersecurity. This filters arxiv's EDR-disambiguation noise
+    (Early Data Release / Energy Demand Reduction / Event Data Recorder)."""
+
+    def test_cyber_guard_drops_arxiv_edr_astronomy_pollution(self):
+        from open_deep_research.eu_extractor import extract_from_search_result
+        # Simulate an arxiv hit on "Early Data Release Quasars" — a paper
+        # that has nothing to do with cybersecurity but mentions "EDR".
+        arxiv_result = {
+            "url": "https://arxiv.org/abs/2308.15586v1",
+            "title": "Improved Redshifts for DESI EDR Quasars",
+            "content": (
+                "We address the challenges of interpreting endpoint data by "
+                "segmenting narratives into windows and emit X-ray stacking "
+                "techniques. The majority of the DESI pipeline redshifts are reliable. "
+                "We use very accurate photometric redshifts to measure AGN absorbing columns."
+            ),
+            "score": 1.0,
+            "provider": "searxng",
+            "engine": "arxiv",
+        }
+        # With cyber_guard enabled + cyber topic → no EU emitted
+        eus = extract_from_search_result(
+            arxiv_result,
+            research_topic="EDR endpoint detection response market 2024",
+            cyber_guard=True,
+        )
+        # All sentences mention "endpoint" or "EDR" but NOT in cybersecurity
+        # context (it's astronomy). The guard should drop them all.
+        assert len(eus) == 0, (
+            f"cyber_guard should drop astronomy EDR, got {len(eus)} EU"
+        )
+
+    def test_cyber_guard_keeps_genuine_cybersecurity_content(self):
+        from open_deep_research.eu_extractor import extract_from_search_result
+        genuine = {
+            "url": "https://arxiv.org/abs/2408.01993",
+            "title": "Towards Automatic Hands-on-Keyboard Attack Detection Using LLMs in EDR Solutions",
+            "content": (
+                "This paper presents a machine learning model for endpoint detection and response. "
+                "We address the challenges of detecting malware in real-time. "
+                "Our approach improves threat hunting accuracy by 23%."
+            ),
+            "score": 1.0,
+            "provider": "searxng",
+            "engine": "arxiv",
+        }
+        eus = extract_from_search_result(
+            genuine,
+            research_topic="EDR endpoint detection response market 2024",
+            cyber_guard=True,
+        )
+        # 3 sentences, all cybersecurity-relevant, all kept
+        assert len(eus) >= 2, f"genuine EDR paper should pass guard, got {len(eus)} EU"
+
+    def test_cyber_guard_disabled_keeps_everything(self):
+        from open_deep_research.eu_extractor import extract_from_search_result
+        arxiv_result = {
+            "url": "https://arxiv.org/abs/2308.15586v1",
+            "title": "Improved Redshifts for DESI EDR Quasars",
+            "content": "The majority of the DESI pipeline redshifts are reliable.",
+            "score": 1.0,
+            "provider": "searxng",
+            "engine": "arxiv",
+        }
+        # cyber_guard=False → all EU pass through (no filtering)
+        eus = extract_from_search_result(
+            arxiv_result,
+            research_topic="EDR endpoint detection response market 2024",
+            cyber_guard=False,
+        )
+        assert len(eus) >= 1, f"cyber_guard=False should keep all, got {len(eus)} EU"
+
+    def test_cyber_guard_keeps_vendor_pages_even_without_cyber_keyword(self):
+        """Vendor pages (qihoo/sangfor/crowdstrike etc.) should be exempt from
+        the guard — their claim may be generic product copy that doesn't
+        contain cyber keywords but is still highly relevant."""
+        from open_deep_research.eu_extractor import extract_from_search_result
+        vendor_page = {
+            "url": "https://www.qihoo.com/products",
+            "title": "Qihoo 360 Enterprise Security Suite",
+            "content": (
+                "Our flagship product delivers comprehensive protection. "
+                "Trusted by 10,000+ enterprises across China."
+            ),
+            "score": 1.0,
+            "provider": "searxng",
+            "engine": "bing",
+        }
+        eus = extract_from_search_result(
+            vendor_page,
+            research_topic="EDR endpoint detection response market 2024",
+            cyber_guard=True,
+        )
+        # Vendor page exempted → keep all
+        assert len(eus) >= 1, f"vendor page should pass guard, got {len(eus)} EU"
+
+    def test_cyber_guard_no_op_for_non_cyber_topic(self):
+        """For non-cyber briefs (e.g. market research on agriculture), the
+        guard should be a no-op. This prevents accidentally dropping
+        legitimate content when the brief isn't about cybersecurity."""
+        from open_deep_research.eu_extractor import extract_from_search_result
+        non_cyber = {
+            "url": "https://example.com/agriculture-report",
+            "title": "Global Wheat Market 2024",
+            "content": "Wheat production grew by 5% this year due to favorable weather.",
+            "score": 1.0,
+            "provider": "searxng",
+            "engine": "bing",
+        }
+        eus = extract_from_search_result(
+            non_cyber,
+            research_topic="Global wheat market analysis 2024",
+            cyber_guard=True,
+        )
+        assert len(eus) >= 1, f"non-cyber topic should not trigger guard, got {len(eus)} EU"

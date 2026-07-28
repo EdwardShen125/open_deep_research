@@ -164,12 +164,22 @@ def test_plan_independent_of_data_flow():
 # ---------------------------------------------------------------------------
 
 def test_plan_dimensions_mode_assigns_all_5():
-    """dimension-driven default: 5 standard dimensions covered per brief."""
+    """dimension-driven default: 5 standard dimensions + 1 context sub-topic covered per brief.
+
+    P3 fix: context sub_topic now has explicit dimension_id="context" (was None)
+    so the EU table preserves provenance. We therefore expect 6 dim values:
+    5 canonical + "context". The test asserts both invariants:
+      - all 5 canonical dimensions present
+      - context sub_topic exists and is tagged
+    """
     from open_deep_research.planner_v2 import DIMENSION_ORDER
     plan = plan_from_brief("EDR market overview 2024", max_subtopics=6)
     dims = sorted(s.dimension_id for s in plan.sub_topics if s.dimension_id)
-    assert dims == sorted(DIMENSION_ORDER), f"missing dims: {set(DIMENSION_ORDER) - set(dims)}"
-    print(f"  ✓ dimensions mode: 5 dims covered = {dims}")
+    # All 5 canonical dimensions still covered
+    assert set(DIMENSION_ORDER).issubset(set(dims)), f"missing dims: {set(DIMENSION_ORDER) - set(dims)}"
+    # Plus the context sub_topic (P3 fix — was None, now "context")
+    assert "context" in dims, f"context sub_topic missing: {dims}"
+    print(f"  ✓ dimensions mode: {len(dims)} dims covered = {dims}")
 
 
 def test_plan_dimensions_mode_uses_dimension_specific_queries():

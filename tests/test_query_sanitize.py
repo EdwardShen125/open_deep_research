@@ -129,9 +129,13 @@ class TestPlanFromBriefContextShort:
     """Context sub_topic question should be brief verbatim, not 'context of:' wrapper."""
 
     def test_dimensions_mode_context_no_wrapper(self):
+        """P3 fix: context sub_topic now has explicit dimension_id='context'
+        (was None). This test checks the brief-verbatim question wrapper,
+        not the dimension_id assignment (covered in test_planner_v2).
+        """
         brief = "EDR market 2024 vendors growth regulation"
         plan = plan_from_brief(brief=brief, max_subtopics=6, mode="dimensions")
-        context = [st for st in plan.sub_topics if st.dimension_id is None]
+        context = [st for st in plan.sub_topics if st.dimension_id == "context"]
         assert len(context) == 1
         q = context[0].question
         assert "context of:" not in q
