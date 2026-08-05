@@ -27,7 +27,18 @@ from pydantic import BaseModel, Field, model_validator
 # Literal type aliases
 # =============================================================================
 
-ClaimType = Literal["quantitative", "qualitative", "comparative", "event", "attribute"]
+ClaimType = Literal[
+    "quantitative",
+    "qualitative",
+    "comparative",
+    "event",
+    "attribute",
+    # plan C1 扩展:路由层意图类型(报告层也接受)
+    "regulation",
+    "financial",
+    "m_and_a",
+    "trends",
+]
 Tier = Literal["A", "B", "C", "D"]
 
 
