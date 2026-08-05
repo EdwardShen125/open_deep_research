@@ -23,6 +23,7 @@ networks:
 volumes:
   pgdata:
   redisdata:
+  tei-data:
 
 services:
   postgres:
@@ -87,6 +88,31 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+
+  tei-embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:1.8.0
+    container_name: odr-tei
+    restart: unless-stopped
+    command:
+      - '--model-id=BAAI/bge-m3'
+      - '--max-client-batch-size=32'
+      - '--max-batch-tokens=1000000'
+      - '--pooling=cls'
+      - '--dtype=float16'
+    volumes:
+      - tei-data:/data
+    networks:
+      data:
+        aliases: [tei-embed]
+      pipeline-internal:
+        aliases: [tei-embed]
+      outside-bridge: {}
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --spider -q http://localhost:8080/health || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
 
   # 隔离验证用容器 - 只接 pipeline-internal,不可外联
   pipeline-shell:

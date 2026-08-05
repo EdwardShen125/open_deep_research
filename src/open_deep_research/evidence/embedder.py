@@ -29,6 +29,51 @@ logger = logging.getLogger(__name__)
 
 EMBED_DIM = 1024
 
+# Optional TEI HTTP backend. Set TEI_URL=http://tei-host:8080 to use a remote
+# Text Embeddings Inference (TEI) server. Falls back to local sentence-transformers.
+TEI_URL = os.environ.get("TEI_URL", "").strip()
+TEI_TIMEOUT_SECONDS = float(os.environ.get("TEI_TIMEOUT_SECONDS", "30"))
+
+
+def _tei_embed_texts(texts: list[str]) -> Optional[np.ndarray]:
+    """Call TEI HTTP /embed endpoint. Returns (N, D) float32 or None on failure.
+
+    Failures are logged and trigger fallback to local model — TEI is best-effort.
+    """
+    if not TEI_URL:
+        return None
+    try:
+        import urllib.request
+        import json as _json
+        payload = _json.dumps({"inputs": texts, "normalize": True}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{TEI_URL.rstrip('/')}/embed",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=TEI_TIMEOUT_SECONDS) as resp:
+            data = _json.loads(resp.read())
+        arr = np.asarray(data, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[0] != len(texts):
+            logger.warning("TEI: unexpected response shape %s for %d texts", arr.shape, len(texts))
+            return None
+        # L2-normalize defensively
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-12, 1.0, norms)
+        arr = (arr / norms).astype(np.float32)
+        # Pad/truncate to EMBED_DIM (1024) for pgvector HNSW compatibility
+        if arr.shape[1] < EMBED_DIM:
+            pad = np.zeros((arr.shape[0], EMBED_DIM - arr.shape[1]), dtype=np.float32)
+            arr = np.concatenate([arr, pad], axis=1)
+        elif arr.shape[1] > EMBED_DIM:
+            arr = arr[:, :EMBED_DIM]
+        logger.info("TEI: embedded %d texts via %s dim=%d", len(texts), TEI_URL, arr.shape[1])
+        return arr
+    except Exception as e:
+        logger.warning("TEI embed failed (url=%s, n=%d): %s", TEI_URL, len(texts), e)
+        return None
+
 
 def _hash_pseudo_vector(text: str, dim: int = EMBED_DIM) -> np.ndarray:
     """Deterministic 1024-dim pseudo-vector from text SHA-256.
@@ -195,6 +240,14 @@ def embed_texts(
     if model == "hash":
         return np.stack([_hash_pseudo_vector(t) for t in texts_list])
 
+    # TEI HTTP backend (only when TEI_URL is set)
+    if model == "tei" or (model in ("minilm", "bge-m3") and TEI_URL):
+        out = _tei_embed_texts(texts_list)
+        if out is not None:
+            return out
+        # TEI unavailable — fall through to local model
+        logger.info("TEI unavailable; using local sentence-transformers fallback")
+
     # 真模型路径
     hf_name = {
         "minilm": "sentence-transformers/all-MiniLM-L6-v2",
@@ -236,6 +289,9 @@ def embedder_status() -> dict:
     s = _BGEModelSingleton.status()
     s["default_dim"] = EMBED_DIM  # legacy compat
     s["dim"] = s.get("model_dim") or EMBED_DIM
+    s["tei_url_configured"] = bool(TEI_URL)
+    s["tei_url"] = TEI_URL or None
+    s["backend"] = "tei" if TEI_URL else ("sentence-transformers" if s.get("loaded") else "hash-fallback")
     return s
 
 
