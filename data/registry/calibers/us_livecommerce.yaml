@@ -1,0 +1,81 @@
+# =============================================================================
+# F2 seed: us_livecommerce 口径注册表
+# =============================================================================
+# plan F2:同一 metric_type 下不同 caliber 数值差再大也不取平均。
+# 这里为 us_livecommerce 定义 ≥ 2 个 caliber,差 3-5 倍:
+#   - eMarketer 直播零售 (146.4B)
+#   - Coresight/McKinsey 广义视频购物 (550B-678B)
+# =============================================================================
+
+vertical: us_livecommerce
+
+calibers:
+  # ---- 口径 1:eMarketer 直播零售(窄口径) ----
+  - id: us_livestream_retail_emarketer
+    metric_type: market_size
+    entity: us_live_commerce
+    definition: >-
+      仅社交/核心电商直播网络内直接成交流水(streamed commerce)。
+      不含品牌官网非直播视频购物、不含中国本土市场。
+    includes:
+      - livestream commerce
+      - social commerce livestream
+      - creator-driven live shopping
+    excludes:
+      - CTV / shoppable TV
+      - brand.com video shopping (non-live)
+      - China market
+      - TikTok Shop GMV outside US
+    canonical_source_type: research_house
+    year_applicable: [2023, 2024, 2025, 2026, 2027]
+
+  # ---- 口径 2:Coresight 广义视频购物(宽口径) ----
+  - id: us_video_shopping_broad_coresight
+    metric_type: market_size
+    entity: us_video_shopping
+    definition: >-
+      广义视频购物:直播 + shoppable CTV + shoppable short-form video
+      + brand.com video shopping 总和。
+    includes:
+      - livestream commerce
+      - shoppable CTV
+      - shoppable short-form video
+      - brand.com video shopping
+      - influencer-driven video purchase
+    excludes:
+      - China market
+      - pure display video ads (no purchase path)
+    canonical_source_type: research_house
+    year_applicable: [2023, 2024, 2025, 2026, 2027]
+
+  # ---- 口径 3:McKinsey 咨询视角(中口径) ----
+  - id: us_live_commerce_mckinsey
+    metric_type: market_size
+    entity: us_live_commerce
+    definition: >-
+      McKinsey 2024 报告口径:含社交直播 + 短视频内嵌购物,不含 CTV。
+    includes:
+      - social livestream
+      - short-form video shoppable
+      - creator-driven commerce
+    excludes:
+      - CTV
+      - China market
+      - brand.com non-video commerce
+    canonical_source_type: research_house
+    year_applicable: [2024, 2025]
+
+  # ---- 口径 4:渗透率(单一 caliber,非冲突) ----
+  - id: us_penetration_emarketer
+    metric_type: penetration
+    entity: us_online_shoppers
+    definition: >-
+      美国网购人群中至少参与过一次直播购物的比例(年活口径)。
+    includes:
+      - livestream viewers
+      - short-form video shoppers
+    excludes:
+      - CTV-only viewers
+      - passive video viewers (no click)
+    canonical_source_type: research_house
+    year_applicable: [2023, 2024, 2025]
