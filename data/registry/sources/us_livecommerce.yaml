@@ -1,0 +1,188 @@
+# =============================================================================
+# F1 seed: us_livecommerce 源注册表
+# =============================================================================
+# 人工策展数据,版本化、code-reviewable。
+#
+# 策展原则(plan 硬教训 a):
+#   - tier 按"认知权威"判定,不是按域名白名单机械降级
+#   - A = 具名研究机构自有数据 + 政府/监管/IR/SEC
+#   - B = 老牌主流媒体 + 行业垂直媒体 + 头部券商研报
+#   - C = 聚合站 / 爬虫估算 / 厂商二手转载
+#   - D = 自媒体 / UGC / 无源
+#
+# A/B 级源 ≥ 15 条(plan F1 DoD)。
+# =============================================================================
+
+vertical: us_livecommerce
+
+sources:
+  # ---- A 级:具名研究机构(自有数据) ----
+  - domain: emarketer.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, penetration, share]
+    notes: "Insider Intelligence 旗下;canonical US live commerce market data (146.4B 口径来源)"
+  - domain: coresight.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, trends]
+    notes: "Coresight Research;广义视频购物口径代表"
+  - domain: mckinsey.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, penetration, trends]
+    notes: "McKinsey Global Institute;权威咨询"
+  - domain: bain.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, share, trends]
+  - domain: forrester.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, trends]
+  - domain: gartner.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, trends]
+  - domain: iab.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, share]
+    notes: "Interactive Advertising Bureau;广告侧数据"
+
+  # ---- A 级:政府/监管/IR/SEC ----
+  - domain: sec.gov
+    tier: A
+    source_type: official
+    covers: [financial, m_and_a]
+    notes: "上市公司 filings(10-K/10-Q/S-1)"
+  - domain: ftc.gov
+    tier: A
+    source_type: official
+    covers: [regulation]
+    notes: "Federal Trade Commission;电商披露规则"
+  - domain: census.gov
+    tier: A
+    source_type: official
+    covers: [market_size, penetration]
+    notes: "US Census Bureau;零售贸易统计"
+  - domain: uspto.gov
+    tier: A
+    source_type: official
+    covers: [trends]
+    notes: "商标/专利活动"
+  - domain: fcc.gov
+    tier: A
+    source_type: official
+    covers: [regulation]
+    notes: "Federal Communications Commission;CTV/广播"
+
+  # ---- B 级:老牌主流媒体 ----
+  - domain: reuters.com
+    tier: B
+    source_type: mainstream_media
+    covers: [market_size, m_and_a, trends]
+  - domain: ft.com
+    tier: B
+    source_type: mainstream_media
+    covers: [market_size, m_and_a, trends]
+  - domain: wsj.com
+    tier: B
+    source_type: mainstream_media
+    covers: [market_size, financial, m_and_a]
+  - domain: nytimes.com
+    tier: B
+    source_type: mainstream_media
+    covers: [trends, m_and_a]
+  - domain: bloomberg.com
+    tier: B
+    source_type: mainstream_media
+    covers: [market_size, financial, m_and_a]
+
+  # ---- B 级:行业垂直媒体 + 中文权威 ----
+  - domain: iresearch.com.cn
+    tier: B
+    source_type: industry_media
+    covers: [market_size, penetration]
+    notes: "艾瑞咨询"
+  - domain: caixin.com
+    tier: B
+    source_type: mainstream_media
+    covers: [market_size, financial]
+  - domain: 36kr.com
+    tier: B
+    source_type: industry_media
+    covers: [trends, m_and_a]
+  - domain: yicai.com
+    tier: B
+    source_type: mainstream_media
+    covers: [market_size, financial]
+  - domain: pandaily.com
+    tier: B
+    source_type: industry_media
+    covers: [trends]
+    notes: "cross-border e-commerce 视角"
+
+  # ---- C 级:聚合 / 爬虫估算 / 厂商二手 ----
+  - domain: fastmoss.com
+    tier: C
+    source_type: crawler_estimate
+    covers: [gmv_estimate, sku_rank]
+    notes: "爬虫估算 GMV,非权威但量级参考"
+  - domain: chinaz.com
+    tier: C
+    source_type: crawler_estimate
+    covers: [gmv_estimate]
+  - domain: semrush.com
+    tier: C
+    source_type: crawler_estimate
+    covers: [trends]
+    notes: "traffic estimate"
+  - domain: paloaltonetworks.com
+    tier: C
+    source_type: vendor
+    covers: [trends, share]
+    notes: "厂商市场宣传"
+  - domain: sentinelone.com
+    tier: C
+    source_type: vendor
+    covers: [share, trends]
+
+  # ---- D 级:UGC / 自媒体(留作示例,不参与主结论) ----
+  - domain: reddit.com
+    tier: D
+    source_type: ugc
+    covers: [trends]
+  - domain: medium.com
+    tier: D
+    source_type: ugc
+    covers: [trends]
+
+query_templates:
+  market_size:
+    - "{topic} market size {year} site:{domain}"
+    - "{topic} market size {year}"
+    - "{topic} GMV {year}"
+  penetration:
+    - "{topic} penetration rate {year} site:{domain}"
+    - "{topic} adoption {year}"
+  share:
+    - "{topic} market share {year} site:{domain}"
+    - "{topic} share {year}"
+  gmv_estimate:
+    - "{topic} GMV estimate {year} site:{domain}"
+  sku_rank:
+    - "{topic} top SKUs {year} site:{domain}"
+  regulation:
+    - "{topic} rule site:.gov"
+    - "{topic} regulation {year}"
+    - "{topic} disclosure requirement"
+  financial:
+    - "{topic} 10-K {year} site:sec.gov"
+    - "{topic} revenue {year}"
+  m_and_a:
+    - "{topic} acquisition {year}"
+    - "{topic} M&A deal"
+  trends:
+    - "{topic} trend {year}"
+    - "{topic} forecast {year}"
