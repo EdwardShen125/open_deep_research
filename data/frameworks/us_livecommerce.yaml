@@ -1,0 +1,161 @@
+# =============================================================================
+# F3 seed: us_livecommerce vertical 骨架
+# =============================================================================
+# plan F3 DoD:种子 vertical ≥ 6 section / ≥ 25 slot;
+# 每个 quantitative slot 必须声明 caliber_id + required_tier_min。
+# 这里 6 section / 28 slot。
+# =============================================================================
+
+vertical_id: us_livecommerce
+title: 美国直播电商市场研究骨架
+
+sections:
+  # ---- 1. 市场总览 ----
+  - section_id: market_overview
+    title: 市场总览
+    slots:
+      - slot_id: market_size_2025
+        question: 2025 年美国直播电商市场规模(美元)?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+        notes: eMarketer 口径,直播零售(窄)
+      - slot_id: market_size_broad_2025
+        question: 2025 年美国广义视频购物市场规模(美元)?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_video_shopping_broad_coresight
+        notes: Coresight 口径,广义视频购物(宽)
+      - slot_id: market_size_2026
+        question: 2026 年美国直播电商市场规模预测(美元)?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: market_size_2027
+        question: 2027 年美国直播电商市场规模预测(美元)?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: penetration_2025
+        question: 2025 年美国直播购物用户渗透率?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_penetration_emarketer
+      - slot_id: cagr_5y
+        question: 2025-2030 年 5 年 CAGR?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: china_comparison
+        question: 中国直播电商规模 vs 美国对比?
+        expected_claim_type: comparative
+        comparison_axis: us_vs_china
+        notes: 仅做量级对比,不做口径调和
+
+  # ---- 2. 玩家格局 ----
+  - section_id: player_landscape
+    title: 玩家格局
+    slots:
+      - slot_id: top_players_overview
+        question: 美国直播电商主要玩家有哪些?
+        expected_claim_type: qualitative
+      - slot_id: amazon_live_share
+        question: Amazon Live 在美国直播电商的市场份额?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: tiktok_shop_share
+        question: TikTok Shop 美国市场份额?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: whatnot_share
+        question: Whatnot 美国市场份额?
+        expected_claim_type: quantitative
+        required_tier_min: C
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: top_player_funding
+        question: 主要玩家最近一轮融资情况?
+        expected_claim_type: event
+      - slot_id: m_and_a_history
+        question: 2020-2025 年重要并购事件?
+        expected_claim_type: event
+
+  # ---- 3. 品类结构 ----
+  - section_id: category_tree
+    title: 品类结构
+    slots:
+      - slot_id: category_skincare_share
+        question: 护肤美妆品类在直播电商的份额?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: category_apparel_share
+        question: 服饰品类在直播电商的份额?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: category_electronics_share
+        question: 电子产品品类在直播电商的份额?
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: category_food_share
+        question: 食品品类在直播电商的份额?
+        expected_claim_type: quantitative
+        required_tier_min: C
+        caliber_id: us_livestream_retail_emarketer
+      - slot_id: category_home_share
+        question: 家居品类在直播电商的份额?
+        expected_claim_type: quantitative
+        required_tier_min: C
+        caliber_id: us_livestream_retail_emarketer
+
+  # ---- 4. 法规环境 ----
+  - section_id: regulation
+    title: 法规环境
+    slots:
+      - slot_id: ftc_disclosure_rule
+        question: FTC 对直播带货披露的要求?
+        expected_claim_type: qualitative
+      - slot_id: state_tax_issues
+        question: 州一级销售税对直播电商的影响?
+        expected_claim_type: qualitative
+      - slot_id: data_privacy_compliance
+        question: 数据隐私合规(CCPA / 各州)?
+        expected_claim_type: qualitative
+
+  # ---- 5. 趋势 ----
+  - section_id: trends
+    title: 趋势
+    slots:
+      - slot_id: creator_economy_2025
+        question: 创作者经济对直播电商的影响?
+        expected_claim_type: qualitative
+      - slot_id: ai_personalization
+        question: AI 个性化推荐在直播电商的应用?
+        expected_claim_type: qualitative
+      - slot_id: ctv_convergence
+        question: CTV 与直播电商融合趋势?
+        expected_claim_type: qualitative
+      - slot_id: live_commerce_abroad_us
+        question: 海外品牌入华 vs 中国品牌出海美国?
+        expected_claim_type: comparative
+        comparison_axis: inbound_vs_outbound
+
+  # ---- 6. 风险 ----
+  - section_id: risks
+    title: 风险
+    slots:
+      - slot_id: consumer_trust
+        question: 消费者信任度风险?
+        expected_claim_type: qualitative
+      - slot_id: logistics_challenges
+        question: 物流与履约风险?
+        expected_claim_type: qualitative
+      - slot_id: counterfeit_risk
+        question: 假货 / 灰色市场风险?
+        expected_claim_type: qualitative
+      - slot_id: macroeconomic_sensitivity
+        question: 宏观经济周期敏感性?
+        expected_claim_type: qualitative
