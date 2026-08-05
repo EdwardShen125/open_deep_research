@@ -113,14 +113,26 @@ class SourceIntent(BaseModel):
 
 def _format_query(template: str, *, topic: str, year: Optional[int], domain: Optional[str]) -> str:
     """format query template;domain=None 时跳过 site: 部分。"""
+    # 先 format 占位符
     try:
-        if domain:
-            return template.format(topic=topic, year=year or "", domain=domain)
+        if "{topic}" in template or "{year}" in template:
+            formatted = template.format(topic=topic, year=year or "")
         else:
-            # 模板含 site:{domain} 时去掉
-            return template.replace("site:{domain}", "").strip().format(topic=topic, year=year or "")
+            formatted = template
     except (KeyError, IndexError):
-        return template
+        formatted = template
+    # site: 处理
+    if domain:
+        if "{domain}" in formatted:
+            formatted = formatted.replace("{domain}", domain)
+        elif "site:" not in formatted:
+            # 已 format 完但没 site: → 拼接 site:
+            formatted = formatted.rstrip() + f" site:{domain}"
+    else:
+        # 无 domain → 移除残留 site: 部分
+        import re
+        formatted = re.sub(r"site:\S+", "", formatted).strip()
+    return formatted
 
 
 def _extract_topic(slot: Slot) -> tuple[str, Optional[int]]:
@@ -151,17 +163,22 @@ def route_sources(
         slot: 目标槽
         registry: F1 源注册表
         calibers: F2 口径注册表(可选,用于 caliber_id 命中特定源类型)
+
+    Returns:
+        SourceIntent,query_list 已 format(topic + year + domain 都填好)
+        直接可喂给 search provider。
     """
     target_types = claim_type_to_target_sources(slot.expected_claim_type)
     if not target_types:
         # 未知 claim_type → 无定向意图(明示),query_list 全无 site-scoped
         templates = _fallback_templates(slot, registry)
+        topic, year = _extract_topic(slot)
+        formatted = [_format_query(t, topic=topic, year=year, domain=None) for t in templates]
         return SourceIntent(
             target_source_types=[],
-            query_list=templates,
+            query_list=formatted,
         )
 
-    # 1. site-scoped 前 N 条
     topic, year = _extract_topic(slot)
     site_scoped_queries: list[str] = []
     target_type_set = set(target_types)
@@ -169,31 +186,28 @@ def route_sources(
     # 从 F1 筛 source_type ∈ target_types 的所有 A/B 级源
     for source_type in target_types:
         matching_sources = registry.sources_by_type(source_type, min_tier="B")  # type: ignore[arg-type]
-        # 取 metric_type 匹配的优先,否则取全部
         if slot.caliber_id:
-            # caliber → metric_type 推断(简化:用 slot.expected_claim_type)
             metric_match = [s for s in matching_sources if _matches_metric(s, slot, registry)]
             if metric_match:
                 matching_sources = metric_match
 
-        # 取每个 source_type 至少 1 个代表源(避免 query_list 过长)
         for s in matching_sources[:2]:  # 每 source_type 至多 2 个
             template = _pick_template(slot, registry)
             q = _format_query(template, topic=topic, year=year, domain=s.domain)
             if "site:" in q:
                 site_scoped_queries.append(q)
 
-    # 2. 兜底:广义 query templates(无 site-scoped)
+    # 兜底:广义 query templates(无 site-scoped)
     fallback_queries = _fallback_templates(slot, registry)
+    fallback_formatted = [_format_query(t, topic=topic, year=year, domain=None) for t in fallback_queries]
 
-    # 3. 拼装:site-scoped 前 N 条(N = len(target_types)) + 兜底
-    #    如果 site_scoped 比 N 多,只取前 N
+    # site-scoped 前 N 条(N = len(target_types))
     n = len(target_types)
     site_scoped_first_n = site_scoped_queries[:n]
 
     return SourceIntent(
         target_source_types=target_types,
-        query_list=site_scoped_first_n + fallback_queries,
+        query_list=site_scoped_first_n + fallback_formatted,
     )
 
 
