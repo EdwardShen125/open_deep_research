@@ -1,0 +1,150 @@
+# registry: cn_cybersec sources
+# Schema matches us_livecommerce.yaml — tier / source_type / covers / notes
+# Plan F1 DoD: A/B 级源 ≥ 15 条
+
+vertical: cn_cybersec
+
+sources:
+  # ---- A 级:具名研究机构(自有数据) ----
+  - domain: idc.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, share, trends]
+    notes: "IDC 中国;权威 IT 市场调研"
+  - domain: ccidconsulting.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, share, trends]
+    notes: "赛迪顾问;中国 ICT 市场"
+  - domain: gartner.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, share, trends]
+    notes: "Gartner;全球 + 中国区报告"
+  - domain: forrester.com
+    tier: A
+    source_type: research_house
+    covers: [market_size, trends]
+    notes: "Forrester Wave for EDR"
+  - domain: iresearch.com.cn
+    tier: A
+    source_type: research_house
+    covers: [market_size, penetration, trends]
+    notes: "艾瑞咨询"
+  - domain: iimedia.cn
+    tier: A
+    source_type: research_house
+    covers: [market_size, share]
+    notes: "艾媒咨询"
+
+  # ---- A 级:政府/监管/标准 ----
+  - domain: cac.gov.cn
+    tier: A
+    source_type: regulator
+    covers: [regulation]
+    notes: "国家互联网信息办公室;数据出境 / 网络安全审查"
+  - domain: mps.gov.cn
+    tier: A
+    source_type: regulator
+    covers: [regulation]
+    notes: "公安部;等保 2.0 / 网络安全执法"
+  - domain: tc260.org.cn
+    tier: A
+    source_type: regulator
+    covers: [regulation]
+    notes: "全国信息安全标准化技术委员会;国标 GB/T"
+  - domain: cnnvd.org.cn
+    tier: A
+    source_type: regulator
+    covers: [vulnerability, market_size]
+    notes: "国家信息安全漏洞共享平台"
+  - domain: cert.org.cn
+    tier: A
+    source_type: regulator
+    covers: [regulation, vulnerability]
+    notes: "国家互联网应急中心 CNCERT/CC"
+
+  # ---- A 级:厂商一手(财报 / IR / 产品文档) ----
+  - domain: qax.com.cn
+    tier: A
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "奇安信 688561.SH 财报 + 产品文档"
+  - domain: sangfor.com.cn
+    tier: A
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "深信服 300454.SZ 财报 + 产品文档"
+  - domain: venustech.com.cn
+    tier: A
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "启明星辰 002439.SZ"
+  - domain: nsfocus.com
+    tier: A
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "绿盟科技 300369.SZ"
+  - domain: dbappsecurity.com.cn
+    tier: A
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "安恒信息 688023.SH"
+  - domain: topsec.com.cn
+    tier: A
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "天融信 002212.SZ"
+
+  # ---- B 级:行业垂直媒体 ----
+  - domain: anquanke.com
+    tier: B
+    source_type: industry_media
+    covers: [trends, vulnerability, m_and_a]
+    notes: "安全客(奇安信旗下)"
+  - domain: freebuf.com
+    tier: B
+    source_type: industry_media
+    covers: [trends, vulnerability, m_and_a]
+    notes: "FreeBuf 行业媒体"
+  - domain: seebug.org
+    tier: B
+    source_type: industry_media
+    covers: [vulnerability, trends]
+    notes: "知道创宇 404实验室;漏洞 / 攻击趋势"
+  - domain: secpulse.com
+    tier: B
+    source_type: industry_media
+    covers: [trends, vulnerability]
+    notes: "安全脉搏"
+
+  # ---- B 级:中文主流财经 ----
+  - domain: caixin.com
+    tier: B
+    source_type: mainstream_media
+    covers: [financial, m_and_a]
+  - domain: yicai.com
+    tier: B
+    source_type: mainstream_media
+    covers: [financial, m_and_a]
+  - domain: 36kr.com
+    tier: B
+    source_type: industry_media
+    covers: [m_and_a, trends]
+
+  # ---- B 级:国际对照(海外厂商财报) ----
+  - domain: crowdstrike.com
+    tier: B
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "CrowdStrike CRWD 财报"
+  - domain: sentinelone.com
+    tier: B
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "SentinelOne S 财报"
+  - domain: microsoft.com
+    tier: B
+    source_type: official_vendor
+    covers: [financial, product]
+    notes: "Microsoft Defender / Security 业务线"

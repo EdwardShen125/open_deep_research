@@ -145,6 +145,15 @@ async def _stage_extract(state: dict, ctx: dict) -> dict:
         writer_response=state.get("writer_response"),
         title=state.get("title", "Plan v2 Report"),
         max_subtopics=state.get("max_subtopics", 4),
+        # 4-layer pass-through
+        vertical=state.get("vertical"),
+        archetypes=state.get("archetypes"),
+        ontology=state.get("ontology"),
+        registry_vertical=state.get("registry_vertical"),
+        instance_brand=state.get("instance_brand"),
+        instance_market=state.get("instance_market"),
+        instance_category=state.get("instance_category"),
+        instance_year=state.get("instance_year"),
     )
     state["plan_v2_result"] = result
     state["stages_completed"] = state.get("stages_completed", []) + ["extract"]
@@ -268,6 +277,15 @@ async def run_pipeline_resumable(
     writer_response: Optional[str] = None,
     title: str = "Plan v2 Report",
     max_subtopics: int = 4,
+    # 4-layer architecture (post-architecture-v2)
+    vertical: Optional[str] = None,
+    archetypes: Optional[list[str]] = None,
+    ontology: Optional[str] = None,
+    registry_vertical: Optional[str] = None,
+    instance_brand: Optional[str] = None,
+    instance_market: Optional[str] = None,
+    instance_category: Optional[str] = None,
+    instance_year: Optional[int] = None,
 ) -> PlanV2RunResult:
     """以 ResearchJob 5-stage 模式跑 plan_v2 pipeline。
 
@@ -294,6 +312,15 @@ async def run_pipeline_resumable(
         "writer_response": writer_response,
         "title": title,
         "max_subtopics": max_subtopics,
+        # 4-layer pass-through
+        "vertical": vertical,
+        "archetypes": archetypes,
+        "ontology": ontology,
+        "registry_vertical": registry_vertical,
+        "instance_brand": instance_brand,
+        "instance_market": instance_market,
+        "instance_category": instance_category,
+        "instance_year": instance_year,
     }
     final_state = await job.run(run_id, initial_state=initial_state)
     result = final_state.get("plan_v2_result")

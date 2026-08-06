@@ -320,6 +320,68 @@ def _sanitize_query_for_searxng(q: str) -> str:
     return out or q
 
 
+def _apply_indicator_hollows(
+    queries: list[str], ontology: Optional[Any] = None,
+) -> list[str]:
+    """Disambiguate queries using ontology.indicator_hollows.
+
+    Used by the 4-layer plan (post-architecture-v2). The ontology's
+    `indicator_hollows.<key>.exclude_terms` and `positive_terms` are
+    appended to each query as AND NOT / AND filters, so SearXNG drops
+    polysemy hits (e.g. EDR = Endothelium-Dependent Relaxation) and
+    reinforces the intended sense (EDR = Endpoint Detection and Response).
+
+    For an EDR + cybersecurity brief, each query becomes:
+      "<original> 终端检测响应 NOT \"Endothelium\""
+    (bounded to 200 chars to fit SearXNG URL limit).
+
+    If ontology is None, queries pass through unchanged.
+    """
+    if not ontology or not queries:
+        return queries
+
+    hollows = getattr(ontology, "indicator_hollows", None)
+    if not hollows:
+        return queries
+
+    out: list[str] = []
+    for q in queries:
+        # Pick the hollow whose positive_terms overlap the query
+        chosen = None
+        q_lower = q.lower()
+        for hk, hv in hollows.items():
+            positives = hv.get("positive_terms", []) if isinstance(hv, dict) else []
+            if any(t.lower() in q_lower for t in positives):
+                chosen = (hk, hv)
+                break
+        if not chosen:
+            out.append(q)
+            continue
+        hk, hv = chosen
+        positives = hv.get("positive_terms", [])
+        excludes = hv.get("exclude_terms", [])
+        if not positives and not excludes:
+            out.append(q)
+            continue
+        # Append first positive (Chinese if any) to disambiguate, then
+        # first 2 English exclude terms as NOT.
+        extras: list[str] = []
+        cn_pos = next((p for p in positives if any("\u4e00" <= c <= "\u9fff" for c in p)), None)
+        if cn_pos:
+            extras.append(cn_pos)
+        for ex in excludes[:2]:
+            # Wrap multi-word in quotes for SearXNG NOT semantics
+            if " " in ex:
+                extras.append(f'NOT "{ex}"')
+            else:
+                extras.append(f"NOT {ex}")
+        augmented = f"{q} " + " ".join(extras)
+        if len(augmented) > 200:
+            augmented = augmented[:200].rstrip()
+        out.append(augmented)
+    return out
+
+
 def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str], list[str], str]:
     """Return (engines, categories, topic) per-dimension defaults.
 

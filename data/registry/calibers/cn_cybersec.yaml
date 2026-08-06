@@ -1,0 +1,90 @@
+# registry: cn_cybersec calibers
+# Schema matches us_livecommerce.yaml — id / metric_type / entity / definition / includes / excludes
+
+vertical: cn_cybersec
+
+calibers:
+  # ---- 口径 1:窄口径(纯 EDR / 终端检测响应) ----
+  - id: cn_edr_idc_2024_narrow
+    metric_type: market_size
+    entity: cn_edr
+    definition: 纯终端检测与响应(EDR)软件市场,不含 EPP / 防病毒 / DLP
+    includes:
+      - 终端检测与响应
+      - EDR 软件
+      - 主机卫士
+      - 端点威胁检测
+    excludes:
+      - EPP 端点保护平台
+      - 防病毒软件
+      - 终端 DLP
+      - 终端管理 UEM
+    canonical_source_type: research_house
+    year_applicable: [2023, 2024, 2025, 2026]
+
+  # ---- 口径 2:宽口径(终端安全 / 端点安全) ----
+  - id: cn_endpoint_security_idc_2024_broad
+    metric_type: market_size
+    entity: cn_endpoint_security
+    definition: 终端安全大口径:EDR + EPP + 防病毒 + 主机卫士 + 终端 DLP
+    includes:
+      - 终端检测与响应
+      - 端点保护平台
+      - 防病毒
+      - 主机卫士
+      - 终端 DLP
+      - UEM 中的安全模块
+    excludes:
+      - 网络边界安全
+      - 数据中心安全
+      - 云安全(独立赛道)
+    canonical_source_type: research_house
+    year_applicable: [2023, 2024, 2025, 2026]
+
+  # ---- 口径 3:网络安全大口径(含所有子赛道) ----
+  - id: cn_cybersec_total_idc_2024
+    metric_type: market_size
+    entity: cn_cybersec
+    definition: 中国网络安全市场总规模,所有子赛道加总
+    includes:
+      - 终端安全
+      - 边界安全
+      - 数据安全
+      - 应用安全
+      - 云安全
+      - 身份与访问管理
+    canonical_source_type: research_house
+    year_applicable: [2023, 2024, 2025, 2026]
+
+  # ---- 增长口径 ----
+  - id: cn_edr_growth_yoy
+    metric_type: growth_rate
+    entity: cn_edr
+    definition: 同比增长率 (YoY)
+    year_applicable: [2023, 2024, 2025]
+
+  # ---- 营收口径(厂商级) ----
+  - id: cn_edr_vendor_revenue
+    metric_type: revenue
+    entity: cn_edr_vendor
+    definition: 单家厂商年度网络安全业务收入(财报口径,人民币)
+    includes:
+      - 安全产品收入
+      - 安全服务收入
+    excludes:
+      - 非安全业务收入
+    year_applicable: [2022, 2023, 2024]
+
+  # ---- 市场份额口径 ----
+  - id: cn_edr_share
+    metric_type: share
+    entity: cn_edr
+    definition: 单家厂商在中国 EDR 市场的份额
+    year_applicable: [2023, 2024, 2025]
+
+  # ---- 处罚金额口径 ----
+  - id: cn_cybersec_fine
+    metric_type: fine_amount
+    entity: cn_cybersec_violation
+    definition: 单一违规事件罚款金额(万元)
+    year_applicable: [2020, 2021, 2022, 2023, 2024]

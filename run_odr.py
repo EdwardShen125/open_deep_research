@@ -260,6 +260,10 @@ async def _run(args) -> int:
     print(f"[run_odr] mode: {args.mode}", file=sys.stderr)
     print(f"[run_odr] max_subtopics: {args.max_subtopics}", file=sys.stderr)
     print(f"[run_odr] pg_persist: {args.persist_pg}", file=sys.stderr)
+    print(f"[run_odr] 4-layer: archetypes={args.archetype} ontology={args.ontology} "
+          f"registry={args.registry} instance.market={args.market} "
+          f"instance.category={args.category} instance.year={args.year}",
+          file=sys.stderr)
 
     t0 = time.time()
     try:
@@ -270,6 +274,14 @@ async def _run(args) -> int:
             fallback=provider if args.mode == "live" else None,
             max_subtopics=args.max_subtopics,
             title=f"ODR: {args.brief[:60]}",
+            # 4-layer (post-architecture-v2)
+            archetypes=args.archetype.split(",") if args.archetype else None,
+            ontology=args.ontology,
+            registry_vertical=args.registry,
+            instance_brand=args.brand,
+            instance_market=args.market,
+            instance_category=args.category,
+            instance_year=args.year,
         )
     except Exception as e:
         print(f"[run_odr] PIPELINE FAILED: {e}", file=sys.stderr)
@@ -340,6 +352,17 @@ def main():
     p.add_argument("--persist-pg", action="store_true", default=True,
                    help="Persist EUs/claims/sources/checkpoints to production PG (default true)")
     p.add_argument("--no-persist-pg", dest="persist_pg", action="store_false")
+    # ---- 4-layer architecture (post-architecture-v2) ----
+    p.add_argument("--archetype", default=None,
+                   help="Comma-separated archetype list (e.g. 'market_size,competitive,regulatory')")
+    p.add_argument("--ontology", default=None,
+                   help="Ontology id (e.g. 'cn_cybersec', 'us_livecommerce')")
+    p.add_argument("--registry", default=None,
+                   help="Registry vertical id (defaults to --ontology)")
+    p.add_argument("--brand", default=None, help="Instance brand param")
+    p.add_argument("--market", default=None, help="Instance market param (e.g. 'CN', 'US')")
+    p.add_argument("--category", default=None, help="Instance category param")
+    p.add_argument("--year", type=int, default=None, help="Instance year param")
     args = p.parse_args()
     sys.exit(asyncio.run(_run(args)))
 

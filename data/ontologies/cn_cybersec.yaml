@@ -1,0 +1,128 @@
+# ontology: cn_cybersec
+# 中国网络安全 / EDR / 国产软件调研领域本体
+#
+# Owns the domain entity space (which vendors / categories / regulations exist).
+# Does NOT know about research shape (that's archetype).
+
+ontology_id: cn_cybersec
+display_name: 中国网络安全
+
+# =============================================================================
+# entity_spaces — 实体集合
+# archetype 里的 `expansion: source: "{ontology}.<key>"` 会展开这里
+# =============================================================================
+
+entity_spaces:
+  # ---- 厂商实体空间(竞争格局 archetype 用)----
+  vendors:
+    items:
+      - {id: qax,       name: 奇安信,   tier: A, official: qax.com.cn}
+      - {id: sangfor,   name: 深信服,   tier: A, official: sangfor.com.cn}
+      - {id: venustech, name: 启明星辰, tier: A, official: venustech.com.cn}
+      - {id: nsfocus,   name: 绿盟科技, tier: A, official: nsfocus.com}
+      - {id: dbapp,     name: 安恒信息, tier: A, official: dbappsecurity.com.cn}
+      - {id: topsec,    name: 天融信,   tier: A, official: topsec.com.cn}
+      - {id: 360,       name: 360 集团, tier: A, official: 360.cn}
+      - {id: antgroup,  name: 蚂蚁集团安全, tier: B, official: antgroup.com}
+      - {id: meitu,     name: 美亚柏科, tier: B, official: fjjt.com}
+    product_lines:
+      qax: [天擎 EDR, 椒图云, 椒图]
+      sangfor: [EDR 终端检测响应, aSEC]
+      venustech: [天镜 EDR, 天珣]
+      nsfocus: [绿盟 EDR, WAF]
+      dbapp: [安恒 EDR, 明御]
+      topsec: [天融信 EDR, 猎拓]
+      360: [360 安全卫士, 360 终端安全]
+
+  # ---- 品类树(产品矩阵 archetype 用)----
+  categories:
+    tree:
+      终端安全:
+        - EDR 终端检测响应
+        - EPP 端点保护平台
+        - CWPP 云工作负载保护
+        - 主机卫士
+      边界安全:
+        - 防火墙 / NGAF
+        - WAF
+        - IDPS 入侵检测防御
+      数据安全:
+        - DLP 数据防泄漏
+        - 数据库加密
+        - 备份与恢复
+      应用安全:
+        - 漏洞扫描
+        - 代码审计
+        - 渗透测试
+
+# 法规实体(合规准入 archetype 用)
+regulations:
+  items:
+    - {id: djbp,  name: 网络安全等级保护 2.0(等保 2.0), effective: 2019-12-01, scope: 国标}
+    - {id: gjzc,  name: 关键信息基础设施安全保护条例, effective: 2021-09-01, scope: 行政法规}
+    - {id: dsjfa, name: 数据安全法,                effective: 2021-09-01, scope: 法律}
+    - {id: grsj,  name: 个人信息保护法,            effective: 2021-11-01, scope: 法律}
+    - {id: wlaqfa,name: 网络安全法,                effective: 2017-06-01, scope: 法律}
+    - {id: sjbg,  name: 网络数据安全管理条例,      effective: 2024-09-30, scope: 行政法规}
+    - {id: ipms,  name: 商用密码管理条例(2023 修订),effective: 2023-07-01, scope: 行政法规}
+  certification_bodies:
+    - {id: cnnvd, name: 国家信息安全漏洞共享平台,    role: 漏洞披露}
+    - {id: cncert,name: 国家互联网应急中心,         role: 应急响应}
+    - {id: ctid,  name: 中国信通院,                  role: 检测认证}
+
+# =============================================================================
+# metrics — 关键指标定义
+# archetype 的 `caliber_ref: "{ontology}.<metric>"` 在这里 resolve
+# =============================================================================
+
+metrics:
+  - {id: market_size,   unit: 亿元人民币, currency: CNY, source: IDC/赛迪}
+  - {id: growth_rate,   unit: 百分比,     type: percent}
+  - {id: share,         unit: 百分点,     type: percent}
+  - {id: revenue,       unit: 亿元人民币, currency: CNY}
+  - {id: customer_count,unit: 家}
+  - {id: fine_amount,   unit: 万元人民币, currency: CNY}
+
+# =============================================================================
+# indicator_hollows — 领域消歧知识
+# query_constructor 读这里净化搜索 query,避免 EDR 多义陷阱
+# =============================================================================
+
+indicator_hollows:
+  # EDR 在中文搜索里有大量多义噪音(医学/能源/材料)
+  # 这是第一次 EDR 调研失败的根本原因
+  edr_disambiguation:
+    primary_meaning: 终端检测与响应(Endpoint Detection and Response)
+    exclude_terms:
+      # 英文 / 拉丁缩写其他含义
+      - Endothelium-Dependent Relaxation     # 心血管
+      - Energy Demand Reduction              # 能源
+      - Energy Dissipation Ratio             # 材料
+      - Energy-Delay Ratio                   # 网络协议
+      - Event Data Recorder                  # 车载
+      - Early Data Release                   # 天文 / 医学统计
+      - Estimated Diagnostic Rate            # 兽医
+      - Extended Disease Registration         # 流行病学
+      - Early Drain Removal                  # 外科
+    positive_terms:
+      - 终端检测响应
+      - 终端检测与响应
+      - endpoint detection and response
+      - 主机卫士
+      - 端点检测
+      - EPP
+      - 终端安全
+    positive_cn_vendors:
+      - 奇安信
+      - 深信服
+      - 启明星辰
+      - 绿盟
+      - 安恒
+      - 天融信
+      - 360
+    positive_en_vendors:
+      - CrowdStrike
+      - SentinelOne
+      - Microsoft Defender
+      - Carbon Black
+      - Trend Micro

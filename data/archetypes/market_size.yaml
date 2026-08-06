@@ -1,0 +1,77 @@
+# archetype: market_size
+# Reusable across domains (CN EDR / US live commerce / F&B retail / SaaS / ...).
+# Owns the question shape "how big is the market", not the domain entities.
+# Domain entities come from ontology.entity_spaces.
+
+archetype_id: market_size
+title: 市场规模评估
+description: |
+  评估 {market} 区域、{year} 年 {category} 市场的 TAM/SAM/SOM 三档数值。
+  输出:数字 + 来源 + 口径分歧。Nino 硬规则:口径分歧不取平均。
+
+sections:
+  - id: tam
+    title: 总可达市场 (TAM)
+    slots:
+      - id: tam_total
+        question: "{market} {category} {year} 年总市场规模 ({currency})"
+        expected_claim_type: quantitative
+        required_tier_min: A
+        caliber_ref: "{ontology}.market_size"
+        notes: 宽口径,所有相关支出加总
+      - id: tam_yoy
+        question: "{market} {category} {year} 年同比增长率"
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_ref: "{ontology}.growth_rate"
+
+  - id: sam
+    title: 可服务市场 (SAM)
+    slots:
+      - id: sam_addressable
+        question: "{market} {category} 中 {brand} 可服务子市场规模 ({currency})"
+        expected_claim_type: quantitative
+        required_tier_min: A
+        caliber_ref: "{ontology}.market_size"
+        notes: 排除地区/品类/客户类型不可服务部分
+
+  - id: caliber_divergence
+    title: 口径分歧
+    slots:
+      - id: narrow_vs_broad
+        question: "{market} {category} {year} 年窄口径 vs 宽口径数值差"
+        expected_claim_type: comparative
+        comparison_axis: narrow_vs_broad
+        notes: |
+          W6 reconciliation 自动处理:同一 metric + 不同 entity 拆 cluster。
+          不取平均,只展示分歧。
+      - id: caliber_source_audit
+        question: "{market} {category} {year} 年不同口径的发布机构与发布时间"
+        expected_claim_type: qualitative
+        notes: 用于 §3 honest_pass 引用链审计
+
+  - id: growth_dynamics
+    title: 增长动力
+    slots:
+      - id: cagr_5y
+        question: "{year}-{year_plus_5} 年 {market} {category} 复合增长率 CAGR"
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_ref: "{ontology}.growth_rate"
+        # 当 instance 提供 year 时,自动用 year+5
+      - id: growth_drivers
+        question: "{market} {category} 增长的核心驱动因素"
+        expected_claim_type: qualitative
+      - id: growth_obstacles
+        question: "{market} {category} 增长的主要阻碍"
+        expected_claim_type: qualitative
+
+  - id: forecast
+    title: 预测
+    slots:
+      - id: forecast_3y
+        question: "{year}+1/+2/+3 年 {market} {category} 预测规模 ({currency})"
+        expected_claim_type: quantitative
+        required_tier_min: B
+        caliber_ref: "{ontology}.market_size"
+        notes: 三年前瞻,触发 W6 multi-year caliber 对齐

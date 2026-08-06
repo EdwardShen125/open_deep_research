@@ -1,0 +1,72 @@
+# archetype: competitive
+# Reusable across domains. Owns the question shape "who plays in this market".
+# Per-entity expansion is driven by ontology.entity_spaces (e.g. vendors / brands).
+
+archetype_id: competitive
+title: 竞争格局
+description: |
+  {market} 区域 {category} 市场的玩家清单 + 各自位置 + 关键事件。
+  关键:用 expansion 动态展开实体空间(不手列竞品),cap 做背压。
+
+sections:
+  - id: player_overview
+    title: 玩家清单
+    # 动态展开 — 不手写品牌/厂商,使用 ontology.entity_spaces.<key>
+    expansion:
+      source: "{ontology}.vendors"
+      cap: 30
+      per_item_slot:
+        id: "vendor_profile_{item_id}"
+        question: "{item[name]} 在 {market} 的{year}年营收 / 市场份额 / 主要产品线"
+        expected_claim_type: quantitative
+        required_tier_min: A
+        caliber_ref: "{ontology}.revenue"
+        notes: |
+          expansion 把 ontology.vendors 的每个 item 展开为独立 slot。
+          cap=30 防止实体爆炸。{item[name]}/{item_id} 在 instance_ctx 暴露。
+
+  - id: market_structure
+    title: 市场结构
+    slots:
+      - id: concentration_ratio
+        question: "{market} {category} {year} 年市场集中度 CR3 / CR5 / HHI"
+        expected_claim_type: quantitative
+        required_tier_min: A
+        caliber_ref: "{ontology}.share"
+        notes: 高集中度 → 寡头;低 → 分散
+      - id: leader_gap
+        question: "{market} {category} 头部玩家与第二梯队差距"
+        expected_claim_type: comparative
+        comparison_axis: top1_vs_others
+      - id: new_entrants
+        question: "{market} {category} 近 {year_minus_2} 年新进入者"
+        expected_claim_type: event
+
+  - id: product_matrix
+    title: 产品矩阵
+    slots:
+      - id: product_lines_count
+        question: "{market} {category} 主流玩家的产品线数量 / 覆盖度"
+        expected_claim_type: attribute
+        notes: 配合 ontology.categories 分类树
+      - id: pricing_tiers
+        question: "{market} {category} 主流玩家定价档位"
+        expected_claim_type: attribute
+
+  - id: funding_and_ma
+    title: 融资与并购
+    slots:
+      - id: recent_rounds
+        question: "{market} {category} 主流玩家近 {year_minus_2} 年融资轮次与金额"
+        expected_claim_type: event
+      - id: ma_events
+        question: "{market} {category} 主流玩家近 {year_minus_2} 年并购事件"
+        expected_claim_type: event
+
+  - id: switching_costs
+    title: 切换成本
+    slots:
+      - id: lockin_factors
+        question: "{market} {category} 客户切换厂商的核心成本"
+        expected_claim_type: qualitative
+        notes: 数据迁移/培训/合规认证等
