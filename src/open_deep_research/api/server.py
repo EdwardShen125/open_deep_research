@@ -92,11 +92,29 @@ from open_deep_research.evidence.report import (
 _RUN_REGISTRY: dict[str, dict[str, Any]] = {}
 
 
-def _register_run(run_id: str, *, query: str, mode: str) -> None:
+def _register_run(
+    run_id: str, *, query: str, mode: str,
+    vertical: Optional[str] = None,
+    archetypes: Optional[list[str]] = None,
+    ontology: Optional[str] = None,
+    registry_vertical: Optional[str] = None,
+    instance_brand: Optional[str] = None,
+    instance_market: Optional[str] = None,
+    instance_category: Optional[str] = None,
+    instance_year: Optional[int] = None,
+) -> None:
     _RUN_REGISTRY[run_id] = {
         "run_id": run_id,
         "query": query,
         "mode": mode,
+        "vertical": vertical,
+        "archetypes": archetypes,
+        "ontology": ontology,
+        "registry_vertical": registry_vertical,
+        "instance_brand": instance_brand,
+        "instance_market": instance_market,
+        "instance_category": instance_category,
+        "instance_year": instance_year,
         "status": "queued",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "finished_at": None,
@@ -151,6 +169,28 @@ class StartRunRequest(BaseModel):
     )
     run_id: Optional[str] = Field(default=None, description="可选,自定义 run_id")
     max_subtopics: int = Field(default=4, ge=1, le=10)
+    # 4-layer architecture (R3 整改:之前 API 路径无法传 vertical/archetypes,
+    # 4 层架构只在 CLI 可用。改后这些字段透传到 run_pipeline_resumable。)
+    vertical: Optional[str] = Field(
+        default=None,
+        description="legacy: 仅传这个走旧 framework yaml (例: us_livecommerce)",
+    )
+    archetypes: Optional[list[str]] = Field(
+        default=None,
+        description="4-layer: archetype id 列表 (例: ['market_size','competitive'])",
+    )
+    ontology: Optional[str] = Field(
+        default=None,
+        description="4-layer: ontology id (例: cn_cybersec)",
+    )
+    registry_vertical: Optional[str] = Field(
+        default=None,
+        description="4-layer: registry vertical,默认 = ontology",
+    )
+    instance_brand: Optional[str] = Field(default=None)
+    instance_market: Optional[str] = Field(default=None)
+    instance_category: Optional[str] = Field(default=None)
+    instance_year: Optional[int] = Field(default=None, ge=1900, le=2100)
 
 
 class StartRunResponse(BaseModel):
@@ -235,7 +275,18 @@ class HealthResponse(BaseModel):
 # Background task — 跑 plan_v2_pipeline
 # =============================================================================
 
-async def _run_pipeline_background(run_id: str, query: str, mode: str, max_subtopics: int) -> None:
+async def _run_pipeline_background(
+    run_id: str, query: str, mode: str, max_subtopics: int,
+    *,
+    vertical: Optional[str] = None,
+    archetypes: Optional[list[str]] = None,
+    ontology: Optional[str] = None,
+    registry_vertical: Optional[str] = None,
+    instance_brand: Optional[str] = None,
+    instance_market: Optional[str] = None,
+    instance_category: Optional[str] = None,
+    instance_year: Optional[int] = None,
+) -> None:
     """后台任务:跑 pipeline,更新 registry + checkpoint。
 
     设计:
@@ -253,7 +304,11 @@ async def _run_pipeline_background(run_id: str, query: str, mode: str, max_subto
         except Exception as e:
             logger.warning("checkpoint upsert failed (%s/%s): %s", stage, status, e)
 
-    _ckpt("api_received", "done", {"query": query, "mode": mode})
+    _ckpt("api_received", "done", {
+        "query": query, "mode": mode,
+        "vertical": vertical, "archetypes": archetypes,
+        "ontology": ontology, "registry_vertical": registry_vertical,
+    })
 
     from open_deep_research.search_providers import TavilyProvider, SearXNGProvider
     from open_deep_research.staged_runner import run_pipeline_resumable
@@ -274,6 +329,15 @@ async def _run_pipeline_background(run_id: str, query: str, mode: str, max_subto
             primary=primary,
             fallback=fallback,
             max_subtopics=max_subtopics,
+            # R3: 4-layer pass-through
+            vertical=vertical,
+            archetypes=archetypes,
+            ontology=ontology,
+            registry_vertical=registry_vertical,
+            instance_brand=instance_brand,
+            instance_market=instance_market,
+            instance_category=instance_category,
+            instance_year=instance_year,
         )
 
         _ckpt(
@@ -315,6 +379,15 @@ async def _run_pipeline_background(run_id: str, query: str, mode: str, max_subto
 
 async def _run_pipeline_resume_background(
     run_id: str, query: str, mode: str, max_subtopics: int,
+    *,
+    vertical: Optional[str] = None,
+    archetypes: Optional[list[str]] = None,
+    ontology: Optional[str] = None,
+    registry_vertical: Optional[str] = None,
+    instance_brand: Optional[str] = None,
+    instance_market: Optional[str] = None,
+    instance_category: Optional[str] = None,
+    instance_year: Optional[int] = None,
 ) -> None:
     """后台任务:续跑 run(同 run_id,从 checkpoint 跳过已完成 stage)。
 
@@ -334,7 +407,11 @@ async def _run_pipeline_resume_background(
         except Exception as e:
             logger.warning("checkpoint upsert failed (%s/%s): %s", stage, status, e)
 
-    _ckpt("api_resume", "done", {"query": query, "mode": mode})
+    _ckpt("api_resume", "done", {
+        "query": query, "mode": mode,
+        "vertical": vertical, "archetypes": archetypes,
+        "ontology": ontology, "registry_vertical": registry_vertical,
+    })
 
     from open_deep_research.search_providers import TavilyProvider, SearXNGProvider
     from open_deep_research.staged_runner import run_pipeline_resumable
@@ -355,6 +432,15 @@ async def _run_pipeline_resume_background(
             primary=primary,
             fallback=fallback,
             max_subtopics=max_subtopics,
+            # R3: 4-layer pass-through on resume
+            vertical=vertical,
+            archetypes=archetypes,
+            ontology=ontology,
+            registry_vertical=registry_vertical,
+            instance_brand=instance_brand,
+            instance_market=instance_market,
+            instance_category=instance_category,
+            instance_year=instance_year,
         )
 
         _ckpt(
@@ -460,8 +546,29 @@ async def start_run(req: StartRunRequest, background_tasks: BackgroundTasks):
     if rid in _RUN_REGISTRY:
         raise HTTPException(409, f"run_id {rid!r} already exists in registry")
 
-    _register_run(rid, query=req.query, mode=req.mode)
-    background_tasks.add_task(_run_pipeline_background, rid, req.query, req.mode, req.max_subtopics)
+    _register_run(
+        rid,
+        query=req.query, mode=req.mode,
+        vertical=req.vertical,
+        archetypes=req.archetypes,
+        ontology=req.ontology,
+        registry_vertical=req.registry_vertical,
+        instance_brand=req.instance_brand,
+        instance_market=req.instance_market,
+        instance_category=req.instance_category,
+        instance_year=req.instance_year,
+    )
+    background_tasks.add_task(
+        _run_pipeline_background, rid, req.query, req.mode, req.max_subtopics,
+        vertical=req.vertical,
+        archetypes=req.archetypes,
+        ontology=req.ontology,
+        registry_vertical=req.registry_vertical,
+        instance_brand=req.instance_brand,
+        instance_market=req.instance_market,
+        instance_category=req.instance_category,
+        instance_year=req.instance_year,
+    )
 
     return StartRunResponse(
         run_id=rid,
@@ -553,6 +660,15 @@ async def resume_run(
     if mode not in ("evidence-only", "full"):
         raise HTTPException(400, f"mode must be 'evidence-only' or 'full', got {mode!r}")
     max_subtopics = req.max_subtopics if req.max_subtopics is not None else 4
+    # R3: resume 时透传 4-layer 字段给 background task
+    vertical = meta.get("vertical")
+    archetypes = meta.get("archetypes")
+    ontology = meta.get("ontology")
+    registry_vertical = meta.get("registry_vertical")
+    instance_brand = meta.get("instance_brand")
+    instance_market = meta.get("instance_market")
+    instance_category = meta.get("instance_category")
+    instance_year = meta.get("instance_year")
 
     # 读 checkpoint:列出已 done 的 stage(用作 response 里 skipped_stages)
     skipped: list[str] = []
@@ -574,6 +690,14 @@ async def resume_run(
     _update_run(run_id, status="queued", error=None)
     background_tasks.add_task(
         _run_pipeline_resume_background, run_id, query, mode, max_subtopics,
+        vertical=vertical,
+        archetypes=archetypes,
+        ontology=ontology,
+        registry_vertical=registry_vertical,
+        instance_brand=instance_brand,
+        instance_market=instance_market,
+        instance_category=instance_category,
+        instance_year=instance_year,
     )
 
     return ResumeRunResponse(

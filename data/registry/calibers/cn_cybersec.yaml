@@ -58,14 +58,15 @@ calibers:
 
   # ---- 增长口径 ----
   - id: cn_edr_growth_yoy
-    metric_type: growth_rate
+    metric_type: trends
     entity: cn_edr
-    definition: 同比增长率 (YoY)
+    definition: 同比增长率 (YoY) — 归入 trends(metric_type Literal 中最接近的"趋势/速率")
+    canonical_source_type: research_house
     year_applicable: [2023, 2024, 2025]
 
   # ---- 营收口径(厂商级) ----
   - id: cn_edr_vendor_revenue
-    metric_type: revenue
+    metric_type: financial
     entity: cn_edr_vendor
     definition: 单家厂商年度网络安全业务收入(财报口径,人民币)
     includes:
@@ -73,6 +74,7 @@ calibers:
       - 安全服务收入
     excludes:
       - 非安全业务收入
+    canonical_source_type: official
     year_applicable: [2022, 2023, 2024]
 
   # ---- 市场份额口径 ----
@@ -80,11 +82,13 @@ calibers:
     metric_type: share
     entity: cn_edr
     definition: 单家厂商在中国 EDR 市场的份额
+    canonical_source_type: research_house
     year_applicable: [2023, 2024, 2025]
 
-  # ---- 处罚金额口径 ----
+  # ---- 处罚金额口径(归入 financial) ----
   - id: cn_cybersec_fine
-    metric_type: fine_amount
+    metric_type: financial
     entity: cn_cybersec_violation
     definition: 单一违规事件罚款金额(万元)
+    canonical_source_type: official
     year_applicable: [2020, 2021, 2022, 2023, 2024]

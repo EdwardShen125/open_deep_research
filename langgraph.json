@@ -1,7 +1,6 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-        "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher",
         "Plan v2 Researcher": "./src/open_deep_research/plan_v2_researcher.py:plan_v2_researcher"
     },
     "python_version": "3.13",

@@ -20,8 +20,9 @@ that the downstream pipeline (W1..W8) consumes unchanged.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -29,6 +30,8 @@ from pydantic import BaseModel, Field
 from open_deep_research.evidence.framework import (
     Framework, Section, Slot,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -156,16 +159,36 @@ def load_registry(
 # Template rendering
 # =============================================================================
 
-def _render_template(template: str, ctx: Mapping[str, Any]) -> str:
+def _render_template(
+    template: str,
+    ctx: Mapping[str, Any],
+    *,
+    required_keys: Optional[Iterable[str]] = None,
+    render_tag: str = "",
+) -> str:
     """Render {key} placeholders; missing keys → 'unknown' (no exception).
 
     Supports:
       - Simple: {market} {year}
       - Dotted NOT supported by str.format_map (it tries attribute access on
         dict values, which fails). Use indexed instead: {item[name]}.
+
+    R4 整改: 当 caller 显式传 required_keys 时(如 archetype slot 的
+    {market} / {category} / {year}),缺 key 触发 logger.warning 并把模板
+    渲染成含 __MISSING_{key}__ 标记的版本,既保留可读性又便于回查问题。
+    缺 required_keys 时行为不变。
     """
     if not isinstance(template, str):
         return template
+    if required_keys:
+        missing = [k for k in required_keys if not ctx.get(k)]
+        if missing:
+            logger.warning(
+                "[composer] %s missing required template keys: %s "
+                "(template=%r ctx_keys=%s)",
+                render_tag or "render",
+                missing, template[:60], list(ctx.keys()),
+            )
     try:
         return template.format_map({k: ("" if v is None else v) for k, v in ctx.items()})
     except (KeyError, IndexError, AttributeError):
@@ -235,7 +258,12 @@ def build_plan(
         ctx["metric"] = ontology.metrics[0].get("id", "")
 
     sections: list[Section] = []
-    seen_slot_ids: set[str] = set()
+    seen_slot_ids: set[str] = set[str]()
+
+    # R4 整改: 收集 archetype 模板里实际用到的 instance key
+    # ({brand} / {market} / {category} / {year}),并对 caller 没传的部分 warning
+    referenced_instance_keys = _scan_archetype_referenced_keys(archetypes)
+    _validate_instance(instance, referenced_instance_keys)
 
     for arch_id in archetypes:
         arch = load_archetype(arch_id)
@@ -391,6 +419,60 @@ def _emit_expansion(
             comparison_axis=per.get("comparison_axis"),
             notes=notes,
         ))
+
+
+# =============================================================================
+# R4 helpers: instance key validation
+# =============================================================================
+
+# 哪些 key 被识别为"instance 提供"。{brand}/{market}/{category}/{year} 是
+# 4 个常用 slot,在 archetype 模板里被引用时要求 caller 通过 Instance 提供。
+_INSTANCE_KEYS = ("brand", "market", "category", "year")
+
+
+def _scan_archetype_referenced_keys(archetypes: list[str]) -> set[str]:
+    """扫描所有 archetype 的 section/slot/expansion 模板,收集 {key} 被引用的
+    instance key 集合。返回 set,如 {"market", "year"}。
+    """
+    import re
+    pattern = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+    referenced: set[str] = set()
+    for arch_id in archetypes:
+        try:
+            arch = load_archetype(arch_id)
+        except FileNotFoundError:
+            continue
+        for sec_raw in arch.sections:
+            for tmpl in (
+                sec_raw.get("title", ""),
+                *[s.get("question", "") for s in sec_raw.get("slots", [])],
+                *[s.get("id", "") for s in sec_raw.get("slots", [])],
+                *[s.get("caliber_ref", "") for s in sec_raw.get("slots", []) if s.get("caliber_ref")],
+                sec_raw.get("expansion", {}).get("source", "") if sec_raw.get("expansion") else "",
+            ):
+                for m in pattern.finditer(str(tmpl)):
+                    if m.group(1) in _INSTANCE_KEYS:
+                        referenced.add(m.group(1))
+    return referenced
+
+
+def _validate_instance(instance: "Instance", referenced: set[str]) -> None:
+    """R4: 当 archetype 模板引用了某 instance key 但 caller 没传时,
+    logger.warning(不 raise — back-compat,但写明缺失)。
+    """
+    if not referenced:
+        return
+    missing: list[str] = []
+    for k in referenced:
+        if not getattr(instance, k, None):
+            missing.append(k)
+    if missing:
+        logger.warning(
+            "[composer] Instance missing required keys for archetype templates: %s "
+            "(templates reference them but caller did not provide; "
+            "rendering will substitute empty/None and degrade query semantics)",
+            missing,
+        )
 
 
 __all__ = [

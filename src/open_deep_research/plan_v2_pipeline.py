@@ -114,6 +114,10 @@ class PlanV2RunResult:
 
     passed: bool = False
     error: Optional[str] = None
+    # R5 整改: 显式区分 "passed=True 但部分 degraded" 与 "passed=True 且全部 OK"。
+    # section_writer 不可用时 degrade=True + passed=False,确保 golden-eval main
+    # gate 不把降级 placeholder 当成 pass。
+    degraded: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -134,6 +138,7 @@ class PlanV2RunResult:
             "gate_stats": self.gate_stats,
             "passed": self.passed,
             "error": self.error,
+            "degraded": self.degraded,
         }
 
 
@@ -186,132 +191,25 @@ async def run_pipeline(
 
     try:
         # ----- 1. Planner -----
-        # ----- W1: framework.py 驱动计划（"槽"作为一等公民）-----
-        # 旧路径:plan_from_brief() LLM 自由发散 sub_topics
-        # 新路径:data/frameworks/<vertical>.yaml 给出确定性 slot 集,
-        #         每个 slot 携 expected_claim_type / caliber_id / required_tier_min,
-        #         intents 由槽派生。framework 不存在时降级到旧 LLM planner。
-        from open_deep_research.evidence.framework import (
-            Framework, load_framework, Slot,
-        )
+        # W1: 单一事实源 = evidence/plan_builder.build_deterministic_plan
+        # (R1 整改:原 staged_runner 硬编码 load_framework("us_livecommerce"),
+        #  4 层架构在生产路径上实际未生效。改后 W1 hook 只有一处实现,
+        #  staged_runner / run_pipeline / CLI 全部经由 plan_builder 调。)
+        from open_deep_research.evidence.plan_builder import build_deterministic_plan
 
-        framework: Framework | None = None
-        # 4-layer 架构用的 ontology 对象(供下游 W2b indicator_hollows 复用)
-        from open_deep_research.evidence.composer import Ontology as _Ontology
-        onto: _Ontology | None = None
-        # W1 框架:优先用 4 层架构(archetypes × ontology × registry × instance)
-        # 旧路径(仅 vertical=):仍然可用,走 load_framework(vertical)
-        if archetypes and ontology:
-            from open_deep_research.evidence.composer import (
-                build_plan, load_ontology, load_registry, Instance,
-            )
-            try:
-                onto = load_ontology(ontology)
-                reg_v = registry_vertical or ontology
-                reg = load_registry(reg_v)
-                inst = Instance(
-                    brand=instance_brand, market=instance_market,
-                    category=instance_category, year=instance_year,
-                )
-                framework = build_plan(
-                    archetypes=archetypes, ontology=onto,
-                    registry=reg, instance=inst,
-                    vertical_id=ontology,
-                )
-                # 把 4-layer framework 拍扁成 PlannerPlan.sub_topics
-                from open_deep_research.planner_v2 import SubTopic, PlannerPlan
-                framework_subs: list[SubTopic] = []
-                for sec in framework.sections:
-                    for slot in sec.slots:
-                        framework_subs.append(SubTopic(
-                            id=slot.slot_id,
-                            title=slot.question,
-                            question=slot.question,
-                            search_api="searxng",
-                            parallelism="fan_out",
-                            expected_entities=[],
-                            expected_keywords=[],
-                            rationale=slot.notes or "",
-                            dimension_id=sec.section_id,
-                        ))
-                framework_subs = framework_subs[:max_subtopics]
-                plan = PlannerPlan(
-                    title=framework.title,
-                    sub_topics=framework_subs,
-                    waves=[],
-                    notes=f"[W1] from 4-layer build (archetypes={archetypes}, ontology={ontology}), {len(framework_subs)}/{sum(len(s.slots) for s in framework.sections)} slots",
-                )
-                planner_issues = validate_plan(plan)
-                logger.info(
-                    "[W1] intents derived from 4-layer framework slots: count=%d",
-                    len(plan.sub_topics),
-                )
-                logger.info(
-                    "[W1] 4-layer plan built: archetypes=%s ontology=%s "
-                    "registry=%s instance=%s → sections=%d slots=%d",
-                    archetypes, ontology, reg_v,
-                    inst.model_dump(exclude_none=True),
-                    len(framework.sections),
-                    sum(len(s.slots) for s in framework.sections),
-                )
-            except FileNotFoundError as e:
-                logger.warning(
-                    "[W1] 4-layer build failed: %s; falling back to LLM planner",
-                    e,
-                )
-                plan = plan_from_brief(query, max_subtopics=max_subtopics)
-                planner_issues = validate_plan(plan)
-                framework = None  # 4-layer failed, downstream uses LLM plan
-        elif vertical:
-            try:
-                framework = load_framework(vertical)
-                logger.info(
-                    "[W1] framework loaded: vertical=%s sections=%d slots=%d",
-                    vertical, len(framework.sections),
-                    sum(len(s.slots) for s in framework.sections),
-                )
-                # 把 framework 拍扁成 PlannerPlan.sub_topics(每 slot → 1 sub_topic)
-                from open_deep_research.planner_v2 import SubTopic, PlannerPlan
-                framework_subs: list[SubTopic] = []
-                for sec in framework.sections:
-                    for slot in sec.slots:
-                        framework_subs.append(SubTopic(
-                            id=slot.slot_id,
-                            title=slot.question,
-                            question=slot.question,
-                            search_api="searxng",
-                            parallelism="fan_out",
-                            expected_entities=[],
-                            expected_keywords=[],
-                            rationale=slot.notes or "",
-                            dimension_id=sec.section_id,
-                        ))
-                # max_subtopics 仍生效(截断)
-                framework_subs = framework_subs[:max_subtopics]
-                plan = PlannerPlan(
-                    title=framework.title,
-                    sub_topics=framework_subs,
-                    waves=[],
-                    notes=f"[W1] from framework {vertical}.yaml, {len(framework_subs)}/{sum(len(s.slots) for s in framework.sections)} slots",
-                )
-                planner_issues = validate_plan(plan)
-                logger.info(
-                    "[W1] intents derived from framework slots: count=%d "
-                    "(each carries dimension_id=%s)",
-                    len(plan.sub_topics),
-                    plan.sub_topics[0].dimension_id if plan.sub_topics else None,
-                )
-            except FileNotFoundError:
-                logger.info(
-                    "[W1] no framework yaml for %s; falling back to LLM planner",
-                    vertical,
-                )
-                plan = plan_from_brief(query, max_subtopics=max_subtopics)
-                planner_issues = validate_plan(plan)
-        else:
-            # Default: LLM planner (preserves test fixtures / non-vertical briefs)
-            plan = plan_from_brief(query, max_subtopics=max_subtopics)
-            planner_issues = validate_plan(plan)
+        plan, framework, onto = build_deterministic_plan(
+            query,
+            vertical=vertical,
+            archetypes=archetypes,
+            ontology=ontology,
+            registry_vertical=registry_vertical,
+            instance_brand=instance_brand,
+            instance_market=instance_market,
+            instance_category=instance_category,
+            instance_year=instance_year,
+            max_subtopics=max_subtopics,
+        )
+        planner_issues = validate_plan(plan)
         if planner_issues:
             # Non-fatal — log; planner issues are about topology, not data.
             out.cited_report_warnings.extend(
@@ -366,9 +264,17 @@ async def run_pipeline(
                 )
                 try:
                     # 仅在 caller 注入 framework 时启用 source_router。
-                    if framework is not None:
-                        _registry = _load_registry(vertical or "us_livecommerce")
-                        _calibers = _load_calibers(vertical or "us_livecommerce")
+                    # (R1 整改:不再静默回退到 "us_livecommerce"。
+                    #  4-layer → ontology 同时也是 registry_vertical;legacy
+                    #  → vertical;都没有(None)→ 跳过 source_router。)
+                    _reg_v: str | None = None
+                    if onto is not None:
+                        _reg_v = registry_vertical or ontology
+                    elif vertical:
+                        _reg_v = vertical
+                    if _reg_v:
+                        _registry = _load_registry(_reg_v)
+                        _calibers = _load_calibers(_reg_v)
                     else:
                         _registry = None
                         _calibers = None
@@ -605,6 +511,13 @@ async def run_pipeline(
                 writer_response = _placeholder_cited_response(
                     title=title, eus=out.evidence_units,
                 ) + "\n\n<!-- W7 DEGRADED: LLM unavailable, report not generated by section_writer -->\n"
+                # R5 整改: section_writer 不可用时显式标记 degraded + passed=False,
+                # 防止 golden-eval main gate 把降级 placeholder 当成 pass。
+                out.degraded = True
+                out.passed = False
+                out.cited_report_warnings.append(
+                    "W7 section_writer unavailable; placeholder rendered (degraded)"
+                )
         cited, parse_warns = parse_cited_report(writer_response)
         out.cited_report = cited
         out.cited_report_warnings.extend(parse_warns)
