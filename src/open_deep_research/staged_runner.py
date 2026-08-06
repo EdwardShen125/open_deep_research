@@ -63,13 +63,51 @@ async def _stage_setup(state: dict, ctx: dict) -> dict:
     """stage 1: planner(纯 deterministic,不调 LLM,不写 DB)。
 
     失败影响:plan_from_brief 重新调,成本 ~0ms(deterministic 拆分)。
+
+    W1 hook:_stage_setup 在 run_pipeline_resumable 里也调 plan_from_brief,
+    因此这里也加 framework 探测;framework 存在时直接派生 deterministic plan,
+    跳过 LLM。run_pipeline 自己的 W1 hook 是冗余的(双保险)——若这里已
+    set state["plan"],run_pipeline 会复用。
     """
     from open_deep_research.planner_v2 import plan_from_brief
 
     query = state["query"]
     rid = ctx["run_id"]
     logger.info("[stage_setup] query=%s run_id=%s", query[:60], rid)
-    plan = plan_from_brief(query, max_subtopics=state.get("max_subtopics", 4))
+
+    # W1 接线:framework 存在 → 确定性 plan;否则 → LLM plan_from_brief
+    try:
+        from open_deep_research.evidence.framework import load_framework
+        framework = load_framework("us_livecommerce")
+        from open_deep_research.planner_v2 import SubTopic, PlannerPlan
+        subs: list[SubTopic] = []
+        for sec in framework.sections:
+            for slot in sec.slots:
+                subs.append(SubTopic(
+                    id=slot.slot_id,
+                    title=slot.question,
+                    question=slot.question,
+                    search_api="searxng",
+                    parallelism="fan_out",
+                    expected_entities=[],
+                    expected_keywords=[],
+                    rationale=slot.notes or "",
+                    dimension_id=sec.section_id,
+                ))
+        subs = subs[:state.get("max_subtopics", 4)]
+        plan = PlannerPlan(
+            title=framework.title,
+            sub_topics=subs,
+            waves=[],
+            notes=f"[W1] staged_runner framework, {len(subs)} slots",
+        )
+        logger.info(
+            "[stage_setup W1] framework-driven plan: vertical=%s slots=%d",
+            framework.vertical_id, len(subs),
+        )
+    except FileNotFoundError:
+        plan = plan_from_brief(query, max_subtopics=state.get("max_subtopics", 4))
+
     state["plan"] = plan
     state["stages_completed"] = state.get("stages_completed", []) + ["setup"]
     return state

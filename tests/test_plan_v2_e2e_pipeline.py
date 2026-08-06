@@ -60,12 +60,13 @@ class FixtureSearchProvider:
 
     async def search(self, query: SearchQuery):
         out: list[SearchResult] = []
+        # Pre-compute token set for URL/content fallback match.
+        q_tokens_long = {t.strip(".,;:?!").lower() for t in " ".join(query.queries).split() if len(t) > 3}
         for q in query.queries:
             self.calls.append(q)
             key = q
             if key not in self._results:
-                # Substring / fuzzy match. Require ≥1 long-token overlap
-                # between query and key — otherwise we'd match everything.
+                # Strategy A: long-token overlap between query and fixture key.
                 q_tokens = {t.strip(".,;:?!").lower() for t in q.split() if len(t) > 3}
                 best_key = None
                 best_overlap = 0
@@ -77,6 +78,38 @@ class FixtureSearchProvider:
                         best_key = k
                 if best_overlap > 0:
                     key = best_key
+                else:
+                    # Strategy B: W2 source_router mutates queries into
+                    # site-scoped forms (e.g. "...emarketer.com 2025...").
+                    # Token overlap with the original fixture key is zero,
+                    # so fall back to ANY fixture whose URL contains a
+                    # domain present in the query, or whose content shares
+                    # ≥1 long token with the query.
+                    for k, payload in self._results.items():
+                        for r in payload:
+                            url = (r.get("url") or "").lower()
+                            content = (r.get("content") or "").lower()
+                            title = (r.get("title") or "").lower()
+                            haystack = url + " " + content + " " + title
+                            # Domain match: any "foo.com" / "foo.co" substring
+                            # that appears in both the query and the URL.
+                            for token in q_tokens_long:
+                                # strip leading punctuation
+                                tok = token.strip(".,;:?!()[]")
+                                if "." in tok and tok in haystack:
+                                    key = k
+                                    break
+                            if key == q:
+                                # Token match on content/title
+                                for token in q_tokens_long:
+                                    tok = token.strip(".,;:?!()[]")
+                                    if len(tok) > 3 and tok in haystack:
+                                        key = k
+                                        break
+                            if key != q:
+                                break
+                        if key != q:
+                            break
             results = self._results.get(key, self._default)
             for r in results:
                 out.append(SearchResult(

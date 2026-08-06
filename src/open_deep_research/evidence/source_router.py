@@ -112,26 +112,32 @@ class SourceIntent(BaseModel):
 # =============================================================================
 
 def _format_query(template: str, *, topic: str, year: Optional[int], domain: Optional[str]) -> str:
-    """format query template;domain=None 时跳过 site: 部分。"""
-    # 先 format 占位符
+    """format query template;domain=None 时跳过 site: 部分。
+
+    注意:{domain} 不走 .format() — 单独 replace,允许模板同时含 topic/year/domain。
+    """
+    # 先把 {domain} 占位符 + 任何 " site:..." 后缀整段去掉(避免 format 留 {domain} 抛 KeyError,
+    # 也避免我们后追加 site:domain 时与原 site: 重复)
+    import re as _re
+    has_domain_placeholder = "{domain}" in template
+    # 干掉 "{domain}" 和它后面可能跟的 site:xxx + 空格
+    template_no_domain = _re.sub(r"\s*\{domain\}(\s+site:\S+)?", "", template).strip()
+    # format 前先干掉所有残留 "site:" 加任意后缀(含空后缀)— \S+ 不匹配空串
+    template_no_domain = _re.sub(r"site:\S*", "", template_no_domain).strip()
+    template_no_domain = _re.sub(r"\s+", " ", template_no_domain).strip()
     try:
-        if "{topic}" in template or "{year}" in template:
-            formatted = template.format(topic=topic, year=year or "")
+        if "{topic}" in template_no_domain or "{year}" in template_no_domain:
+            formatted = template_no_domain.format(topic=topic, year=year or "")
         else:
-            formatted = template
+            formatted = template_no_domain
     except (KeyError, IndexError):
-        formatted = template
+        formatted = template_no_domain
+    # 再 format 后清一次(防御)
+    formatted = _re.sub(r"site:\S*", "", formatted).strip()
+    formatted = _re.sub(r"\s+", " ", formatted).strip()
     # site: 处理
     if domain:
-        if "{domain}" in formatted:
-            formatted = formatted.replace("{domain}", domain)
-        elif "site:" not in formatted:
-            # 已 format 完但没 site: → 拼接 site:
-            formatted = formatted.rstrip() + f" site:{domain}"
-    else:
-        # 无 domain → 移除残留 site: 部分
-        import re
-        formatted = re.sub(r"site:\S+", "", formatted).strip()
+        formatted = formatted + f" site:{domain}"
     return formatted
 
 

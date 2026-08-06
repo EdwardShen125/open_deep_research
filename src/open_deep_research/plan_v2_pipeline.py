@@ -37,6 +37,9 @@ from typing import Any, Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+parent = logger.parent
+if not logger.handlers and (parent is None or not parent.handlers):
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
 
 from open_deep_research.planner_v2 import (
     PlannerPlan, plan_from_brief, validate_plan,
@@ -75,6 +78,9 @@ from open_deep_research.crawler import (
 )
 from open_deep_research.evidence import EuDAO, ClaimDAO
 from open_deep_research.evidence.pipeline import build_claims_from_eus
+from open_deep_research.evidence.tier_classifier import classify_tier as _classify_tier_abc
+# W3: A/B/C/D tier (cognitive authority) → SourceTier (primary/secondary/...)
+_TIER_ABC_TO_SOURCE = {"A": "primary", "B": "secondary", "C": "tertiary", "D": "ugc"}
 
 
 # =============================================================================
@@ -104,6 +110,7 @@ class PlanV2RunResult:
     report_data: Optional[ReportDataObject] = None
     url_compliance: list[UrlComplianceIssue] = field(default_factory=list)
     gate_stats: dict[str, int] = field(default_factory=dict)  # 闸 1+2+3 命中统计
+    honest_pass: Optional[dict] = None  # W8:honest_pass 收口(unverified/caliber/source_pages)
 
     passed: bool = False
     error: Optional[str] = None
@@ -146,6 +153,7 @@ async def run_pipeline(
     writer_response: Optional[str] = None,
     title: str = "Plan v2 Report",
     max_subtopics: int = 4,
+    vertical: Optional[str] = None,
 ) -> PlanV2RunResult:
     """Run the full plan_v2 stack and return a typed result.
 
@@ -171,8 +179,69 @@ async def run_pipeline(
 
     try:
         # ----- 1. Planner -----
-        plan = plan_from_brief(query, max_subtopics=max_subtopics)
-        planner_issues = validate_plan(plan)
+        # ----- W1: framework.py 驱动计划（"槽"作为一等公民）-----
+        # 旧路径:plan_from_brief() LLM 自由发散 sub_topics
+        # 新路径:data/frameworks/<vertical>.yaml 给出确定性 slot 集,
+        #         每个 slot 携 expected_claim_type / caliber_id / required_tier_min,
+        #         intents 由槽派生。framework 不存在时降级到旧 LLM planner。
+        from open_deep_research.evidence.framework import (
+            Framework, load_framework, Slot,
+        )
+
+        framework: Framework | None = None
+        # W1 框架仅在 caller 显式 vertical= 时启用。
+        # 默认 None → 走 LLM planner(原行为,保持英文/通用 query,
+        # fixture E2E 不会因为硬编码 us_livecommerce 框架而中文化)。
+        if vertical:
+            try:
+                framework = load_framework(vertical)
+                logger.info(
+                    "[W1] framework loaded: vertical=%s sections=%d slots=%d",
+                    vertical, len(framework.sections),
+                    sum(len(s.slots) for s in framework.sections),
+                )
+                # 把 framework 拍扁成 PlannerPlan.sub_topics(每 slot → 1 sub_topic)
+                from open_deep_research.planner_v2 import SubTopic, PlannerPlan
+                framework_subs: list[SubTopic] = []
+                for sec in framework.sections:
+                    for slot in sec.slots:
+                        framework_subs.append(SubTopic(
+                            id=slot.slot_id,
+                            title=slot.question,
+                            question=slot.question,
+                            search_api="searxng",
+                            parallelism="fan_out",
+                            expected_entities=[],
+                            expected_keywords=[],
+                            rationale=slot.notes or "",
+                            dimension_id=sec.section_id,
+                        ))
+                # max_subtopics 仍生效(截断)
+                framework_subs = framework_subs[:max_subtopics]
+                plan = PlannerPlan(
+                    title=framework.title,
+                    sub_topics=framework_subs,
+                    waves=[],
+                    notes=f"[W1] from framework {vertical}.yaml, {len(framework_subs)}/{sum(len(s.slots) for s in framework.sections)} slots",
+                )
+                planner_issues = validate_plan(plan)
+                logger.info(
+                    "[W1] intents derived from framework slots: count=%d "
+                    "(each carries dimension_id=%s)",
+                    len(plan.sub_topics),
+                    plan.sub_topics[0].dimension_id if plan.sub_topics else None,
+                )
+            except FileNotFoundError:
+                logger.info(
+                    "[W1] no framework yaml for %s; falling back to LLM planner",
+                    vertical,
+                )
+                plan = plan_from_brief(query, max_subtopics=max_subtopics)
+                planner_issues = validate_plan(plan)
+        else:
+            # Default: LLM planner (preserves test fixtures / non-vertical briefs)
+            plan = plan_from_brief(query, max_subtopics=max_subtopics)
+            planner_issues = validate_plan(plan)
         if planner_issues:
             # Non-fatal — log; planner issues are about topology, not data.
             out.cited_report_warnings.extend(
@@ -197,6 +266,58 @@ async def run_pipeline(
         )
         all_eus: list[EvidenceUnit] = []
         for st in plan.sub_topics:
+            # ----- W2: source_router + acquirer 定向取证(每槽优先)-----
+            # 旧路径:qc_construct(st) LLM 自由发散
+            # 新路径:framework 存在时,从 Slot 派生定向查询;失败/无 framework → 旧 LLM 兜底
+            source_router_queries: list[str] = []
+            try:
+                from open_deep_research.evidence.source_router import route_sources
+                from open_deep_research.evidence.source_registry import load_registry as _load_registry
+                from open_deep_research.evidence.caliber_registry import (
+                    load_caliber_registry as _load_calibers,
+                )
+                from open_deep_research.evidence.framework import Slot as _FSlot
+                # W4: 从 framework YAML 找出该 slot 对应的真正 caliber_id
+                _fw_caliber_id: Optional[str] = None
+                if framework is not None:
+                    for _sec in framework.sections:
+                        for _slot in _sec.slots:
+                            if _slot.slot_id == (st.id or ""):
+                                _fw_caliber_id = _slot.caliber_id
+                                break
+                        if _fw_caliber_id:
+                            break
+                _fw_slot = _FSlot(
+                    slot_id=(st.id or "slot_default").lower().replace(" ", "_").replace("-", "_")[:64] or "slot_default",
+                    question=st.question,
+                    expected_claim_type="attribute",
+                    required_tier_min="B",
+                    caliber_id=_fw_caliber_id,
+                )
+                try:
+                    # 仅在 caller 注入 framework 时启用 source_router。
+                    if framework is not None:
+                        _registry = _load_registry(vertical or "us_livecommerce")
+                        _calibers = _load_calibers(vertical or "us_livecommerce")
+                    else:
+                        _registry = None
+                        _calibers = None
+                except FileNotFoundError:
+                    _registry = None
+                    _calibers = None
+                if _registry is not None:
+                    _intent = route_sources(
+                        _fw_slot, registry=_registry, calibers=_calibers,
+                    )
+                    source_router_queries = _intent.query_list[:5]
+                    logger.info(
+                        "[W2+W4] source_router intent for slot=%s caliber_id=%s queries=%d (first: %r)",
+                        st.id, _fw_caliber_id, len(source_router_queries),
+                        source_router_queries[0] if source_router_queries else None,
+                    )
+            except Exception as e:
+                logger.warning("[W2] source_router skipped: %s", e)
+
             # 2a. Build an ExecutionPlan (LLM-driven one-shot per sub-topic).
             try:
                 exec_plan = await qc_construct(query, st)
@@ -205,20 +326,43 @@ async def run_pipeline(
                     "query_constructor failed for sub_topic=%s: %s; using legacy single-intent",
                     st.title, e,
                 )
-                # Conservative inline fallback: mirror the pre-QC baseline.
-                legacy_intent_qs = [SearchQuery(
-                    queries=[st.question],
-                    topic="general",
-                    max_results=5,
-                    run_id=rid,
-                    research_topic=st.title,
-                )]
+                # ----- W2: 若 source_router 产出了定向 query,优先用它替代 question -----
+                if source_router_queries:
+                    legacy_intent_qs = [SearchQuery(
+                        queries=source_router_queries[:3],
+                        topic="general",
+                        max_results=5,
+                        run_id=rid,
+                        research_topic=st.title,
+                    )]
+                    logger.info(
+                        "[W2] using source_router queries as fallback intent (n=%d)",
+                        len(legacy_intent_qs[0].queries),
+                    )
+                else:
+                    legacy_intent_qs = [SearchQuery(
+                        queries=[st.question],
+                        topic="general",
+                        max_results=5,
+                        run_id=rid,
+                        research_topic=st.title,
+                    )]
                 exec_plan = None
                 intent_search_queries = legacy_intent_qs
             else:
+                # ----- W2: 合并 source_router 定向查询到 LLM 产出的 query 列表 -----
                 intent_search_queries = to_search_query(
                     exec_plan, run_id=rid, sub_topic=st,
                 )
+                if source_router_queries:
+                    # site-scoped 强制前 N(source_router 已处理 site scoping)
+                    intent_search_queries[0].queries = (
+                        source_router_queries + intent_search_queries[0].queries
+                    )
+                    logger.info(
+                        "[W2] merged source_router (n=%d) into LLM intent queries",
+                        len(source_router_queries),
+                    )
 
             # 2b. Execute each intent → merge results into one Raws set.
             # Each SearchQuery gets one `us.search(...)` call; EUs across
@@ -302,11 +446,81 @@ async def run_pipeline(
 
         # ----- 3. Cited report (writer stage) -----
         if writer_response is None:
-            # Build a *placeholder* report from the EUs so downstream verify
-            # still runs without an LLM in the loop.
-            writer_response = _placeholder_cited_response(
-                title=title, eus=out.evidence_units,
-            )
+            # W7 ★:section_writer 替换 placeholder(只在 LLM 可用时)
+            # 旧路径(被删):_placeholder_cited_response → 默默 string fallback
+            # 新路径:先试 section_writer.write_section(structured ReportResult),
+            #        LLM 不可用 → 显式 degraded placeholder(标记 status,不糊弄)
+            section_writer_used = False
+            try:
+                from open_deep_research.evidence.section_writer import write_section
+                from open_deep_research.evidence.framework import Slot as _w7_Slot
+                from open_deep_research.evidence.claim_v3 import ClaimV3
+                # 若 framework 存在,逐槽写;否则只写一个聚合 section
+                if framework is not None and framework.sections:
+                    section_md_parts: list[str] = []
+                    for _sec in framework.sections[:max_subtopics]:
+                        _claims = [
+                            ClaimV3(
+                                value=(
+                                    f"{eu.numbers[0].text} ({eu.numbers[0].unit or ''})"
+                                    if eu.numbers else eu.claim[:200]
+                                ),
+                                norm_value=(
+                                    float(eu.numbers[0].value_min)
+                                    if eu.numbers and eu.numbers[0].value_min is not None
+                                    else None
+                                ),
+                                source_id=str(id(eu)),  # V1 EU 没有 eu_id,用 id()
+                                source_url=eu.source_url,
+                                source_domain=eu.source_url.split("/")[2] if "/" in eu.source_url else "",
+                                source_title=eu.source_title,
+                                tier="B",
+                                caliber_id=None,
+                                verification_status="to_verify",
+                            )
+                            for eu in out.evidence_units
+                            if eu.dimension_id == _sec.section_id
+                        ][:10]
+                        if not _claims:
+                            continue
+                        _slot = _w7_Slot(
+                            slot_id=_sec.section_id,
+                            question=(_sec.title + " " + _sec.section_id)[:200],  # ≥5 chars
+                            expected_claim_type="qualitative",
+                            required_tier_min="B",
+                        )
+                        try:
+                            _section_result = write_section(_slot, _claims)
+                            section_md_parts.append(
+                                f"## {_sec.title}\n\n"
+                                f"_section_id={_section_result.section_id}; "
+                                f"filled_slots={len(_section_result.slots)}_\n"
+                            )
+                            section_writer_used = True
+                        except Exception as sw_e:
+                            logger.warning(
+                                "[W7] write_section failed for section=%s: %s",
+                                _sec.section_id, sw_e,
+                            )
+                    if section_writer_used and section_md_parts:
+                        writer_response = (
+                            f"# {title}\n\n" + "\n".join(section_md_parts) + "\n"
+                        )
+                        logger.info(
+                            "[W7] section_writer produced %d sections (structured ReportResult)",
+                            len(section_md_parts),
+                        )
+                if not section_writer_used:
+                    raise RuntimeError("section_writer not invoked or failed")
+            except Exception as w7_e:
+                import traceback as _w7_tb
+                logger.warning(
+                    "[W7] section_writer unavailable (%s); falling back to degraded placeholder\n%s",
+                    w7_e, _w7_tb.format_exc(),
+                )
+                writer_response = _placeholder_cited_response(
+                    title=title, eus=out.evidence_units,
+                ) + "\n\n<!-- W7 DEGRADED: LLM unavailable, report not generated by section_writer -->\n"
         cited, parse_warns = parse_cited_report(writer_response)
         out.cited_report = cited
         out.cited_report_warnings.extend(parse_warns)
@@ -320,6 +534,19 @@ async def run_pipeline(
         v2_eus: list = []  # 同时给下面的 merge phase 用
         try:
             v2_eus = [eu.to_v2(run_id=rid) for eu in out.evidence_units]
+
+            # ----- W3: tier_classifier 替换白名单 -----
+            # 旧路径:Phase 5 白名单 upgrade_source_tier(被删)
+            # 新路径:每个 EU 经 tier_classifier.py 赋 tier — F1 注册表命中优先,
+            #        未命中按 .gov/filings/媒体信号,signal-tier fallback 触发 warning
+            for vu in v2_eus:
+                abc = _classify_tier_abc(
+                    source_url=vu.source_url,
+                    source_domain=vu.source_domain,
+                    log_unmatched=False,  # 批量落库时静默兜底,避免 log flood
+                )
+                if abc is not None:
+                    vu.source_tier = _TIER_ABC_TO_SOURCE[abc]  # type: ignore[index]
             if v2_eus:
                 # Runbook P0:真集成验证 — 在 upsert_many 前 batch hook
                 # embed_texts() 写 v2_eus[i].embedding (BGE-M3 真模型优先,
@@ -358,37 +585,48 @@ async def run_pipeline(
         #   闸 3 (NLI)     : LLM 判 (claim, span) entail/contradict/unverifiable
         # 写回 PG evidence_unit.{span_verified, numeric_drift, entailment_*}
         # 闸通过是 grade_claim 出 A/B 的前提 (schema.usable = span_verified && !numeric_drift && entailed)
-        try:
-            if v2_eus:
-                from open_deep_research.evidence.gates_runner import run_gates_and_persist
+        #
+        # W5 ★非交涉:gates_failfast 替换静默包裹
+        #   旧路径(被删):try/except ... warnings.warn(...)  → 续跑 + claim 全 D
+        #   新路径:LLMGateError(auth/timeout/empty) 直接 raise 终止 run,
+        #         span/numeric 闸失败也标 run 失败(SCHEMA.usable=false → D,但不掩盖)
+        if v2_eus:
+            from open_deep_research.evidence.gates_runner import run_gates_and_persist
+            from open_deep_research.evidence.gates_failfast import LLMGateError
+            try:
                 gate_stats = await run_gates_and_persist(v2_eus, run_id=rid, run_nli=True)
-                out.gate_stats = gate_stats  # 让 /runs/{id} 能看见
-                logger.info(
-                    "Phase 2.7 gates (run_id=%s): %s",
-                    rid, gate_stats,
+            except LLMGateError as llm_e:
+                # ★非交涉:绝不静默续跑、绝不"all grade=D"糊弄
+                logger.error(
+                    "Phase 2.7 NLI gate failed (run_id=%s): %s; "
+                    "TERMINATING run, NOT degrading to unverifiable",
+                    rid, llm_e,
                 )
-                # 关键:重新从 PG 读 EU,让后续 merge phase 看到新写的 entailment_verdict
-                try:
-                    with EuDAO() as edao:
-                        v2_eus = edao.list_by_run(rid)
-                    logger.info(
-                        "Phase 2.7 re-fetched %d EU from PG (entailment_verdict populated)",
-                        len(v2_eus),
-                    )
-                except Exception as rf_e:
-                    logger.warning("Phase 2.7 PG re-fetch failed: %s", rf_e)
-        except Exception as gate_e:
-            import warnings
-            warnings.warn(
-                f"Phase 2.7 run_gates_and_persist failed (run_id={rid}): {gate_e}; "
-                "all EU stay unverified → all grade=D",
-                RuntimeWarning,
-                stacklevel=2,
+                out.error = f"NLI gate failed: {llm_e}"
+                out.passed = False
+                out.finished_at = datetime.now(timezone.utc)
+                raise  # 让 caller(api/server / run_edr)看到,不静默吞
+            out.gate_stats = gate_stats  # 让 /runs/{id} 能看见
+            logger.info(
+                "Phase 2.7 gates (run_id=%s): %s",
+                rid, gate_stats,
             )
+            # 关键:重新从 PG 读 EU,让后续 merge phase 看到新写的 entailment_verdict
+            try:
+                with EuDAO() as edao:
+                    v2_eus = edao.list_by_run(rid)
+                logger.info(
+                    "Phase 2.7 re-fetched %d EU from PG (entailment_verdict populated)",
+                    len(v2_eus),
+                )
+            except Exception as rf_e:
+                logger.warning("Phase 2.7 PG re-fetch failed: %s", rf_e)
+        # W5 删除:L413-419 旧的 except Exception ... warnings.warn(...) 静默续跑已被替换
+        #   新路径:L378-393 已显式 except LLMGateError 并 raise,不再 swallow 任何异常
 
         # ----- 3.6 Phase 5 (= Runbook v1 阶段 3.1-3.4): EU → ClaimV2 -----
         # 数据准确性导向 (Runbook v1 §3.3):
-        #   1. upgrade_source_tier — 基于白名单再次校验 source_tier
+        #   1. tier 已在 W3 用 tier_classifier.py 赋,Phase 5 不再做白名单升级
         #   2. merge_units — cosine similarity > 0.92 的 EU 归并
         #   3. build_claim_drafts — 每个 group 生成 canonical claim
         #   4. grade_claim — A/B/C/D 评级 (基于 independent + primary count)
@@ -440,6 +678,79 @@ async def run_pipeline(
                             "claim_id 回填: %d EU -> claim_id (溯源链路完成)",
                             len(eu_to_claim_id),
                         )
+
+            # ----- W6: reconciliation + independence reduce -----
+            # 在 build_claims 之后、报告装配之前;从 EU + framework 派生 ClaimV3,
+            # cluster by measurand key, detect caliber divergence, reconcile.
+            # 跨口径禁 mean/median — primary 选最佳 caliber,其余进 alternatives 标不可比。
+            try:
+                from open_deep_research.evidence.reconciliation import (
+                    cluster_claims, reconcile_cluster,
+                )
+                from open_deep_research.evidence.claim_v3 import ClaimV3
+                from open_deep_research.evidence.caliber_registry import (
+                    load_caliber_registry as _w6_load_calibers,
+                )
+                try:
+                    calibers = _w6_load_calibers("us_livecommerce")
+                except FileNotFoundError:
+                    calibers = None
+                # 建 slot_id → framework slot 的映射(W4 已存 framework)
+                fw_slot_by_id: dict[str, Any] = {}
+                if framework is not None:
+                    for sec in framework.sections:
+                        for sl in sec.slots:
+                            fw_slot_by_id[sl.slot_id] = sl
+                # 从 v2_eus 派生 ClaimV3(EU 没存 caliber_id,从 framework 取)
+                claim_v3_for_recon: list[ClaimV3] = []
+                for eu in v2_eus:
+                    if eu.norm_value is None:
+                        continue
+                    _cal = None
+                    if framework is not None:
+                        _cal = fw_slot_by_id.get(eu.dimension_id or "", None)
+                        # EU 没存 slot_id,只能 dimension 匹配(section_id)
+                    claim_v3_for_recon.append(ClaimV3(
+                        value=str(eu.norm_value),
+                        norm_value=float(eu.norm_value),
+                        source_id=str(eu.eu_id),
+                        source_url=eu.source_url,
+                        source_domain=eu.source_domain,
+                        source_title=eu.source_title,
+                        tier=("A" if eu.source_tier == "primary" else
+                              "B" if eu.source_tier == "secondary" else
+                              "C" if eu.source_tier == "tertiary" else "D"),
+                        caliber_id=None,
+                        verification_status=(
+                            "verified" if eu.span_verified and not eu.numeric_drift
+                            and (eu.entailment_verdict == "entailed") else "to_verify"
+                        ),
+                    ))
+                if claim_v3_for_recon:
+                    clusters = cluster_claims(claim_v3_for_recon)
+                    logger.info(
+                        "[W6] cluster: %d claims → %d clusters (口径分歧候选)",
+                        len(claim_v3_for_recon), len(clusters),
+                    )
+                    for cc in clusters:
+                        try:
+                            rec = reconcile_cluster(cc, calibers=calibers)
+                            logger.info(
+                                "[W6] reconciled: measurand=%s primary=%s caliber=%s "
+                                "divergence=%s alternatives=%d",
+                                rec.measurand[:60],
+                                rec.primary_value,
+                                rec.primary_caliber_id,
+                                rec.divergence_kind,
+                                len(rec.alternatives),
+                            )
+                        except Exception as rec_e:
+                            logger.warning(
+                                "[W6] reconcile_cluster failed: %s",
+                                rec_e,
+                            )
+            except Exception as w6_e:
+                logger.warning("[W6] reconciliation stage skipped: %s", w6_e)
         except Exception as merge_e:
             import warnings
             warnings.warn(
@@ -493,6 +804,49 @@ async def run_pipeline(
             )
         else:
             out.url_compliance = enforce_page_level(rdo)
+
+        # ----- 7a. W8 honest_pass 报告收口 -----
+        # 主结论降级 + [待核实]附录 + 口径误区 + 来源页(从元数据渲染)
+        try:
+            from open_deep_research.evidence.honest_pass import run_honest_pass
+            from open_deep_research.evidence.report_result import ReportResult
+            from open_deep_research.evidence.claim_v3 import ClaimV3
+            # 用 v2_eus(V2 schema 有 span_verified / numeric_drift / entailment_verdict)
+            _claims_v3: list[ClaimV3] = []
+            for _eu in v2_eus:
+                _claims_v3.append(ClaimV3(
+                    value=_eu.claim[:200],
+                    source_id=str(_eu.eu_id),
+                    source_url=_eu.source_url,
+                    source_domain=_eu.source_domain,
+                    source_title=_eu.source_title,
+                    tier=("A" if _eu.source_tier == "primary" else
+                          "B" if _eu.source_tier == "secondary" else
+                          "C" if _eu.source_tier == "tertiary" else "D"),
+                    caliber_id=None,
+                    verification_status=(
+                        "verified" if _eu.span_verified and not _eu.numeric_drift
+                        and (_eu.entailment_verdict == "entailed") else "to_verify"
+                    ),
+                ))
+            _rr = ReportResult(
+                title=rdo.title or title,
+                vertical_id="us_livecommerce",
+                sections=[],
+                unresolved=[],
+            )
+            _rr = run_honest_pass(_rr, _claims_v3, reconciliations=[])  # type: ignore[arg-type]
+            out.honest_pass = _rr.honest_pass or {}
+            hp_stats = out.honest_pass.get("stats", {}) if isinstance(out.honest_pass, dict) else {}
+            logger.info(
+                "[W8] honest_pass: unverified=%d caliber_mismatch=%d sources=%d",
+                hp_stats.get("unverified_count", 0),
+                hp_stats.get("caliber_mismatch_count", 0),
+                hp_stats.get("unique_source_domains", 0),
+            )
+        except Exception as w8_e:
+            logger.warning("[W8] honest_pass skipped: %s", w8_e)
+            out.honest_pass = {"error": str(w8_e)}
 
         # ----- 7. Pass/fail -----
         out.passed = (

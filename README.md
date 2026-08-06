@@ -49,13 +49,28 @@ uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.11 lang
 
 This will open the LangGraph Studio UI in your browser.
 
-```
+```bash
 - 🚀 API: http://127.0.0.1:2024
 - 🎨 Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
 - 📚 API Docs: http://127.0.0.1:2024/docs
 ```
 
 Ask a question in the `messages` input field and click `Submit`. Select different configuration in the "Manage Assistants" tab.
+
+### ⚠️ 脊柱选择:Plan v2 (canonical) vs Deep Researcher (legacy)
+
+`langgraph.json` 现在注册了两条图:
+
+| 图 | 入口 | 状态 | 推荐 |
+|----|------|------|------|
+| **Plan v2 Researcher** | `src/open_deep_research/plan_v2_researcher.py:plan_v2_researcher` | ✅ Canonical | 是 |
+| **Deep Researcher** | `src/open_deep_research/deep_researcher.py:deep_researcher` | ⚠️ Legacy / 已弃用 | 否 |
+
+**Plan v2 是 canonical**——它内部薄包 `staged_runner.run_pipeline_resumable`(5-stage:setup → extract → verify → merge → write),完整执行 W1–W8 整改:tier_classifier / framework 驱动 / source_router 定向取证 / caliber 标注 / fail-fast gates / reconciliation / section_writer / honest_pass。
+
+**Deep Researcher 已弃用**:`final_report_generation` 节点用 `_render_eu_digest(eu_pool)` 把全量 EU 塞进 prompt,曾在 v9 触发 19,955 EU → HTTP 400 灾难。仍可作为兼容入口运行,但新研究请用 Plan v2。
+
+CLI 直接跑:`python run_edr.py --brief "..." --mode live`
 
 ### ⚙️ Configurations
 

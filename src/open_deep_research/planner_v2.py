@@ -53,10 +53,13 @@ class SubTopic:
     def __post_init__(self):
         if not self.title or not self.question:
             raise ValueError("SubTopic.title and .question must be non-empty")
-        # Stable id: hash of (title, question, dimension_id)
-        # 把 dimension 纳入 hash 避免不同 dimension 但 title 相同的 sub_topic 撞 id
-        seed = (self.title + "|" + self.question + "|" + (self.dimension_id or "")).strip().lower()
-        self.id = "st-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+        # W1 hook:若调用方显式设了 id(framework 派生时带 slot_id),保留它;
+        #          只有 id=None 时才用 hash 兜底,确保 framework slot_id 可追溯。
+        if self.id is None:
+            # Stable id: hash of (title, question, dimension_id)
+            # 把 dimension 纳入 hash 避免不同 dimension 但 title 相同的 sub_topic 撞 id
+            seed = (self.title + "|" + self.question + "|" + (self.dimension_id or "")).strip().lower()
+            self.id = "st-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
 
     def to_dict(self) -> dict:
         return asdict(self)
