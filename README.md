@@ -70,7 +70,7 @@ Ask a question in the `messages` input field and click `Submit`. Select differen
 
 **Deep Researcher 已弃用**:`final_report_generation` 节点用 `_render_eu_digest(eu_pool)` 把全量 EU 塞进 prompt,曾在 v9 触发 19,955 EU → HTTP 400 灾难。仍可作为兼容入口运行,但新研究请用 Plan v2。
 
-CLI 直接跑:`python run_edr.py --brief "..." --mode live`
+CLI 直接跑:`python run_odr.py --brief "..." --mode live`
 
 ### ⚙️ Configurations
 

@@ -605,7 +605,7 @@ async def run_pipeline(
                 out.error = f"NLI gate failed: {llm_e}"
                 out.passed = False
                 out.finished_at = datetime.now(timezone.utc)
-                raise  # 让 caller(api/server / run_edr)看到,不静默吞
+                raise  # 让 caller(api/server / run_odr)看到,不静默吞
             out.gate_stats = gate_stats  # 让 /runs/{id} 能看见
             logger.info(
                 "Phase 2.7 gates (run_id=%s): %s",

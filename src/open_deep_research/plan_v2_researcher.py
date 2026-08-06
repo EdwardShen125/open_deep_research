@@ -4,7 +4,7 @@ This is the canonical entry point for `uvx langgraph dev` and any other
 caller that expects a LangGraph-compatible StateGraph. The internal
 node delegates to run_pipeline_resumable (the production 5-stage
 pipeline: setup → extract → verify → merge → write) — the SAME path
-that /api/_run_pipeline_background and run_edr.py use.
+that /api/_run_pipeline_background and run_odr.py use.
 
 §3 (rectification_plan.md):deep_researcher graph is the v9 灾难源
 (via _render_eu_digest eating 19,955 EU). This file replaces it as

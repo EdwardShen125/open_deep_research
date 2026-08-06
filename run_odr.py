@@ -1,19 +1,23 @@
-"""EDR end-to-end CLI entry point.
+"""ODR end-to-end CLI entry point.
 
-Runs `run_pipeline(query: str, ...)` from `plan_v2_pipeline.py` against
-either:
+Note: ODR = Open Deep Research (the project's exact name). We deliberately
+do NOT use "EDR" here because that abbreviation is taken by
+Endpoint Detection and Response in cybersecurity.
+
+Runs `run_pipeline_resumable(query: str, ...)` from `plan_v2_pipeline.py`
+against either:
   --mode fixture  : in-process deterministic fixture provider (no network)
-  --mode live     : SearXNGProvider (172.17.0.3:8888, falls back to fixture)
+  --mode live     : SearXNGProvider (172.18.0.2:8080, falls back to fixture)
 
 Usage:
-  python run_edr.py --brief "What is the size of the US live commerce market?"
-  python run_edr.py --brief "..." --mode live --output report.md
+  python run_odr.py --brief "What is the size of the US live commerce market?"
+  python run_odr.py --brief "..." --mode live --output report.md
 
 This is the missing CLI wrapper that connects:
   planner_v2 → query_constructor → UnifiedSearch → EU extractor
     → claim build → verifier → RDO render → markdown output
 Per SPEC §2 (plan_v2_writer_v2.py placeholder) — implemented as
-`run_edr.py` to avoid clashing with the existing `run_pipeline` import.
+`run_odr.py` to avoid clashing with the existing `run_pipeline` import.
 """
 import argparse
 import asyncio
@@ -156,7 +160,7 @@ class SearXNGOrFixtureProvider(SearchProvider):
 def render_markdown(result, brief: str, pg_summary: dict | None = None) -> str:
     """Render PlanV2RunResult → human-readable markdown."""
     lines = [
-        f"# EDR Report: {brief}",
+        f"# ODR Report: {brief}",
         "",
         f"_Run ID: `{result.run_id}` · Generated: {datetime.now(timezone.utc).isoformat()}_",
         "",
@@ -252,10 +256,10 @@ async def _run(args) -> int:
         print(f"unknown mode: {args.mode}", file=sys.stderr)
         return 2
 
-    print(f"[run_edr] brief: {args.brief!r}", file=sys.stderr)
-    print(f"[run_edr] mode: {args.mode}", file=sys.stderr)
-    print(f"[run_edr] max_subtopics: {args.max_subtopics}", file=sys.stderr)
-    print(f"[run_edr] pg_persist: {args.persist_pg}", file=sys.stderr)
+    print(f"[run_odr] brief: {args.brief!r}", file=sys.stderr)
+    print(f"[run_odr] mode: {args.mode}", file=sys.stderr)
+    print(f"[run_odr] max_subtopics: {args.max_subtopics}", file=sys.stderr)
+    print(f"[run_odr] pg_persist: {args.persist_pg}", file=sys.stderr)
 
     t0 = time.time()
     try:
@@ -265,13 +269,13 @@ async def _run(args) -> int:
             primary=provider,
             fallback=provider if args.mode == "live" else None,
             max_subtopics=args.max_subtopics,
-            title=f"EDR: {args.brief[:60]}",
+            title=f"ODR: {args.brief[:60]}",
         )
     except Exception as e:
-        print(f"[run_edr] PIPELINE FAILED: {e}", file=sys.stderr)
+        print(f"[run_odr] PIPELINE FAILED: {e}", file=sys.stderr)
         return 1
     elapsed = time.time() - t0
-    print(f"[run_edr] pipeline took {elapsed:.1f}s", file=sys.stderr)
+    print(f"[run_odr] pipeline took {elapsed:.1f}s", file=sys.stderr)
 
     # -------------------------------------------------------------------------
     # PG persistence (staged_runner already wrote checkpoints + EU + claim)
@@ -306,10 +310,10 @@ async def _run(args) -> int:
                 conn.commit()
         except Exception as e:
             pg_summary["error"] = repr(e)[:300]
-            print(f"[run_edr] PG read-back failed: {e}", file=sys.stderr)
+            print(f"[run_odr] PG read-back failed: {e}", file=sys.stderr)
 
     print(
-        f"[run_edr] PG: {pg_summary['sources']} sources, "
+        f"[run_odr] PG: {pg_summary['sources']} sources, "
         f"{pg_summary['evidence_units']} EUs, {pg_summary['claims']} claims"
         + (f" | ERROR: {pg_summary['error']}" if pg_summary['error'] else ""),
         file=sys.stderr,
@@ -318,7 +322,7 @@ async def _run(args) -> int:
     md = render_markdown(result, args.brief, pg_summary)
     if args.output:
         Path(args.output).write_text(md, encoding="utf-8")
-        print(f"[run_edr] wrote {args.output} ({len(md)} chars)", file=sys.stderr)
+        print(f"[run_odr] wrote {args.output} ({len(md)} chars)", file=sys.stderr)
     else:
         print(md)
     return 0
@@ -326,7 +330,7 @@ async def _run(args) -> int:
 
 def main():
     p = argparse.ArgumentParser(
-        description="EDR end-to-end runner (planner → search → EU → verifier → RDO)"
+        description="ODR end-to-end runner (planner → search → EU → verifier → RDO)"
     )
     p.add_argument("--brief", required=True, help="Research brief / question")
     p.add_argument("--mode", choices=["fixture", "live"], default="fixture")
