@@ -180,21 +180,47 @@ async def write_section_async(
     )
 
     ainvoke = getattr(llm, "ainvoke", None)
-    if ainvoke is not None:
-        response = await ainvoke([
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
-    else:
-        invoke = getattr(llm, "invoke", None)
-        if invoke is None:
-            raise RuntimeError(
-                f"llm object {type(llm).__name__} has neither ainvoke nor invoke"
+    response = None
+    last_err: Exception | None = None
+    # R14: LLM 偶发返空(MiniMax 间歇性问题 / prompt 超 token)。
+    # 重试 2 次,仍空就降级(任务书 R8:degraded=True / passed=False)。
+    for _attempt in range(3):
+        try:
+            if ainvoke is not None:
+                response = await ainvoke([
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ])
+            else:
+                invoke = getattr(llm, "invoke", None)
+                if invoke is None:
+                    raise RuntimeError(
+                        f"llm object {type(llm).__name__} has neither ainvoke nor invoke"
+                    )
+                response = invoke([
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ])
+            content = getattr(response, "content", None) or str(response) or ""
+            if content.strip():
+                break  # 真拿到内容,退出重试
+            logger.warning(
+                "write_section_async: slot=%s attempt=%d returned empty content",
+                slot.slot_id, _attempt + 1,
             )
-        response = invoke([
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                "write_section_async: slot=%s attempt=%d raised: %s",
+                slot.slot_id, _attempt + 1, e,
+            )
+
+    if response is None or not (getattr(response, "content", None) or str(response or "")).strip():
+        # R14:重试 3 次仍空 → 抛错让上游 plan_v2_pipeline 进 degraded(任务书 R8)
+        raise RuntimeError(
+            f"write_section_async slot={slot.slot_id}: LLM returned empty after 3 attempts"
+            + (f"; last_err={last_err}" if last_err else "")
+        )
 
     content = getattr(response, "content", None) or str(response)
     parsed = _parse_section_response(content)
@@ -844,16 +870,37 @@ Rules:
     )
 
     ainvoke = getattr(llm, "ainvoke", None)
-    if ainvoke is not None:
-        response = await ainvoke([
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
-    else:
-        response = llm.invoke([
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
+    # R14:与 write_section_async 一致 — LLM 偶发空响应,重试 2 次,仍空抛错
+    # 让上游 plan_v2_pipeline 进 degraded(任务书 R8)。
+    response = None
+    last_err: Exception | None = None
+    for _attempt in range(3):
+        try:
+            if ainvoke is not None:
+                response = await ainvoke([
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ])
+            else:
+                response = llm.invoke([
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ])
+            _raw = getattr(response, "content", None) or str(response or "")
+            if _raw.strip():
+                break
+            logger.warning(
+                "write_exec_summary_async: attempt=%d returned empty", _attempt + 1,
+            )
+        except Exception as e:
+            last_err = e
+            logger.warning("write_exec_summary_async: attempt=%d raised: %s", _attempt + 1, e)
+
+    if response is None or not (getattr(response, "content", None) or str(response or "")).strip():
+        raise RuntimeError(
+            f"write_exec_summary_async: LLM returned empty after 3 attempts"
+            + (f"; last_err={last_err}" if last_err else "")
+        )
     content = getattr(response, "content", None) or str(response)
     parsed = _parse_section_response(content)
 

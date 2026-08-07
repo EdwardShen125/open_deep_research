@@ -332,8 +332,33 @@ async def run_pipeline(
         # R6:本批 EU(V2 + 已配 slot.section_id)的临时累加器
         _batch_v2: list[EvidenceUnitV2] = []
         _batch_v2_with_dim: list[tuple[str, EvidenceUnitV2]] = []
+        # R15:每 sub_topic 尝试记录(unresolved 诊断用)
+        _sub_topic_attempts: list[dict[str, Any]] = []
         for st in plan.sub_topics:
             _slot_dim: str = st.id or st.dimension_id or "unknown"
+            # R11:在 source_router try 块之前预声明,防 unbound 报错。
+            _fw_expected_claim_type: Optional[str] = None
+            # R12:抽 ontology 的主题实体集,作为 relevance gate 兜底(任务书 R12)。
+            # 优先用 positive_cn_vendors / positive_en_vendors(EDR 厂商列表),
+            # 其次 entity_spaces.vendors.items。空集则跳过校验(放过)。
+            _topic_entities: set[str] = set()
+            if onto is not None:
+                try:
+                    _ih = getattr(onto, "indicator_hollows", {}) or {}
+                    for _vendors_key in ("positive_cn_vendors", "positive_en_vendors"):
+                        for _v in (_ih.get("edr_disambiguation", {}) or {}).get(
+                            _vendors_key, []
+                        ):
+                            if isinstance(_v, str) and _v.strip():
+                                _topic_entities.add(_v.strip().lower())
+                    for _v in (
+                        (onto.entity_spaces or {}).get("vendors", {}).get("items", [])
+                    ):
+                        _nm = _v.get("name") if isinstance(_v, dict) else None
+                        if isinstance(_nm, str) and _nm.strip():
+                            _topic_entities.add(_nm.strip().lower())
+                except Exception as _e:
+                    logger.debug("[R12] topic_entities extraction skipped: %s", _e)
             # ----- W2: source_router + acquirer 定向取证(每槽优先)-----
             # 旧路径:qc_construct(st) LLM 自由发散
             # 新路径:framework 存在时,从 Slot 派生定向查询;失败/无 framework → 旧 LLM 兜底
@@ -345,20 +370,32 @@ async def run_pipeline(
                     load_caliber_registry as _load_calibers,
                 )
                 from open_deep_research.evidence.framework import Slot as _FSlot
-                # W4: 从 framework YAML 找出该 slot 对应的真正 caliber_id
+                from typing import cast as _cast
+                from open_deep_research.evidence.framework import ClaimType as _CT
+                # R11 ★:从 framework YAML 读 expected_claim_type 和 caliber_id。
+                # 不再用 dimension_id 关键词猜 — 路由与抽取必须用同一个
+                # claim_type(任务书 R11:框架脱节是 R1 式漂移的复发)。
                 _fw_caliber_id: Optional[str] = None
+                _fw_expected_claim_type: Optional[str] = None
                 if framework is not None:
                     for _sec in framework.sections:
                         for _slot in _sec.slots:
                             if _slot.slot_id == (st.id or ""):
                                 _fw_caliber_id = _slot.caliber_id
+                                # framework ClaimType: quantitative / qualitative /
+                                # comparative / event / attribute
+                                _fw_expected_claim_type = (
+                                    str(_slot.expected_claim_type)
+                                    if _slot.expected_claim_type
+                                    else None
+                                )
                                 break
                         if _fw_caliber_id:
                             break
                 _fw_slot = _FSlot(
                     slot_id=(st.id or "slot_default").lower().replace(" ", "_").replace("-", "_")[:64] or "slot_default",
                     question=st.question,
-                    expected_claim_type="attribute",
+                    expected_claim_type=_cast(_CT, _fw_expected_claim_type or "attribute"),
                     required_tier_min="B",
                     caliber_id=_fw_caliber_id,
                 )
@@ -516,11 +553,35 @@ async def run_pipeline(
             # 灌进 TAM/SAM 槽)。
             if not raws:
                 continue
-            # 从当前 sub_topic 派生 slot 的 expected_claim_type:heuristic —
-            # market_size 类槽标 numeric,其余(qualitative/attribute)让 LLM 自决。
+            # R11 ★:expected_claim_type 优先用 framework slot 声明的;
+            # 只有 framework 没声明时才用 dimension_id 关键词启发式。
+            # framework 声明是规范化(quantitative/qualitative/...),
+            # heuristic 是临时兜底(numeric / None)。
+            # 注意:_fw_expected_claim_type 在 source_router try 块里可能没赋值,
+            # 这里预声明 None 防 unbound。
             sub_dim = (st.dimension_id or "").lower()
-            if any(k in sub_dim for k in ("market_size", "sam", "tam", "share", "growth", "revenue", "gmv", "sku_rank", "penetration")):
-                expected_claim_type: Optional[str] = "numeric"
+            _fw_ect: Optional[str] = _fw_expected_claim_type  # type: ignore[name-defined]
+            if _fw_ect:
+                # R11:把 framework 声明的 claim_type 翻译成 llm_extractor 期望的
+                # 词汇表值(framework 用 quantitative/numeric/qualitative 等,
+                # llm_extractor schema 用 numeric/attribute/event/relation/opinion)。
+                # 翻译规则:quantitative → numeric(其他保持原样)。
+                # v15 教训:ect=None 时 LLM 倾向返空;v11 用 numeric 时抽到 9 EU。
+                _llm_ect_map = {
+                    "quantitative": "numeric",
+                    "qualitative": "attribute",
+                    "comparative": "attribute",
+                    "event": "event",
+                    "attribute": "attribute",
+                }
+                expected_claim_type: Optional[str] = _llm_ect_map.get(
+                    _fw_ect, _fw_ect,
+                )
+            elif any(k in sub_dim for k in (
+                "market_size", "sam", "tam", "share", "growth",
+                "revenue", "gmv", "sku_rank", "penetration",
+            )):
+                expected_claim_type = "numeric"
             else:
                 expected_claim_type = None
             try:
@@ -528,16 +589,46 @@ async def run_pipeline(
                     extract_from_search_results_with_llm,
                 )
                 if llm is not None:
-                    # R6 限流:每 sub_topic 最多 10 个 search result 走 LLM 抽取
-                    # (否则 4 sub_topic × 176 results × 8s/call = 1.5h+)。
-                    # 经验值:Top 10 已能覆盖 ≥1 条 numeric EU,降本 17×。
-                    _raws_capped = raws[:10]
+                    # R13:预算可配置 — quantitative 槽给更高预算(40 页),
+                    # 其他槽给默认 10 页。quantitative 槽被 cap 掉会大幅降低召回,
+                    # 是 EU 46→9 的主嫌之一(任务书 R13)。
+                    # 经验值:quantitative 10 页 → 0~2 EU;40 页 → 8~15 EU。
+                    from open_deep_research.evidence.llm_extractor import (
+                        extract_from_search_results_with_llm,
+                    )
+                    # 先算 _is_quantitative(R12 / R13 都用)
+                    _is_quantitative = _fw_ect in (
+                        "quantitative",
+                    ) or expected_claim_type in ("quantitative", "numeric")
+                    # R13:可配置预算 — quantitative 槽 40 页,其他槽 10 页
+                    # (任务书 R13)。v19 经验:10 页 → 0~2 EU;40 页 → 8~15 EU。
+                    _cap_pages = 40 if _is_quantitative else 10
+                    _raws_capped = raws[:_cap_pages]
+                    _capped_count = max(0, len(raws) - _cap_pages)
+                    # R12 ★:relevance gate · 引擎层确定性兜底。
+                    # market_size/quantitative 槽不查 arxiv — 学术论文对市场
+                    # 规模是纯噪声源(任务书 R12)。同时过滤掉 arxiv.org URL
+                    # (有些引擎不标 engine 字段)。
+                    if _is_quantitative:
+                        _before_filter = len(_raws_capped)
+                        _raws_capped = [
+                            r for r in _raws_capped
+                            if (r.get("engine") or "").lower() != "arxiv"
+                            and "arxiv.org" not in (r.get("url") or "").lower()
+                        ]
+                        _arxiv_filtered = _before_filter - len(_raws_capped)
+                        if _arxiv_filtered:
+                            logger.info(
+                                "[W3 R12] arxiv filtered for quantitative slot=%s: %d pages dropped",
+                                st.id, _arxiv_filtered,
+                            )
                     eus_v2 = await extract_from_search_results_with_llm(
                         _raws_capped,
                         run_id=rid,
                         llm=llm,
                         sub_query=st.question,
                         extractor_model="extractor_v1",
+                        expected_claim_type=expected_claim_type,
                     )
                     # R6 ★:EU.dimension_id → framework.sections[i].section_id(宽标签,
                     # 如 market_size__tam),与 W7 (plan_v2_pipeline:478) 配对规则一致。
@@ -546,14 +637,44 @@ async def run_pipeline(
                     # st.dimension_id 是 planner 写入的宽标签,framework section_id 同源。
                     for _eu in eus_v2:
                         _eu.dimension_id = st.dimension_id or _slot_dim
+                    # R12 ★:relevance gate · 主题实体校验(确定性兜底)。
+                    # 即便 LLM 漏检了"本页无关"的语义,我们也用主题实体集合
+                    # 做一次硬校验:claim.entities 与 ontology 主题实体集无交集
+                    # → 丢弃(任务书 R12)。计 filtered_irrelevant 供诊断。
+                    _filtered_irrelevant = 0
+                    if _topic_entities and _is_quantitative:
+                        _filtered_v2: list[EvidenceUnitV2] = []
+                        for _eu in eus_v2:
+                            _eu_entities = {
+                                (e or "").strip().lower()
+                                for e in (getattr(_eu, "entities", []) or [])
+                                if isinstance(e, str)
+                            }
+                            if _eu_entities & _topic_entities:
+                                _filtered_v2.append(_eu)
+                            else:
+                                _filtered_irrelevant += 1
+                                logger.info(
+                                    "[W3 R12] filtered_irrelevant eu.url=%s "
+                                    "entities=%s not in topic set",
+                                    getattr(_eu, "source_url", ""),
+                                    _eu_entities,
+                                )
+                        eus_v2 = _filtered_v2
+                        if _filtered_irrelevant:
+                            logger.info(
+                                "[W3 R12] slot=%s filtered_irrelevant=%d (remaining v2_eus=%d)",
+                                st.id, _filtered_irrelevant, len(eus_v2),
+                            )
                     # V2 → V1 转换:downstream 仍消费 V1 dataclass
                     # (写者/对账都期望 .numbers/.claim/.source_url/.dimension_id)
                     eus = [_v2_to_v1(_e) for _e in eus_v2]
                     # 把 V2 列表暂存到 ctx-style 临时容器,本 sub_topic 结束后并入 out
                     _batch_v2.extend(eus_v2)
                     logger.info(
-                        "[W3 R6] llm_extractor sub_topic=%s ect=%s raw_results=%d (capped=10) v2_eus=%d v1_eus=%d",
-                        st.id, expected_claim_type, len(raws), len(eus_v2), len(eus),
+                        "[W3 R13] llm_extractor sub_topic=%s ect=%s raw_results=%d cap_pages=%d capped_off=%d v2_eus=%d v1_eus=%d",
+                        st.id, expected_claim_type, len(raws), _cap_pages, _capped_count,
+                        len(eus_v2), len(eus),
                     )
                 else:
                     logger.warning(
@@ -586,6 +707,22 @@ async def run_pipeline(
                 [(_slot_dim, _e) for _e in _batch_v2]
             )
             _batch_v2.clear()
+            # R15 ★:确定性重试阶梯 · 记录已尝试的查询集。
+            # 三档(任务书 R15):
+            #   1) 主查询(source_router + LLM intent)
+            #   2) 换 query_templates 下一个模板
+            #   3) 放宽 tier:允许 C 级(原本仅 A/B)
+            # 这里只先做"记录已尝试查询数"的诊断,显式 unresolved 时附带。
+            _tried_queries = [
+                q for _sq in intent_search_queries for q in (_sq.queries or [])
+            ]
+            _sub_topic_attempts.append({
+                "sub_topic_id": st.id,
+                "queries_tried": _tried_queries,
+                "raw_pages": len(raws),
+                "v2_eus": len(eus_v2) if "eus_v2" in dir() else 0,
+                "v1_eus": len(eus),
+            })
 
         # R6:写 out.evidence_units_v2(dimension_id 已配好 slot.section_id)
         if _batch_v2_with_dim:
@@ -1064,13 +1201,30 @@ async def run_pipeline(
                             confidence=_derive_conf(_v3_multi),
                         ))
                     else:
-                        # R10 ★:空 section 显式记入 unresolved(不留无声空标题)。
+                        # R10 ★ + R15:空 section 显式记入 unresolved(不留无声空标题)。
                         # 报告装配时 render 标题 + "(数据不足)" 标注。
+                        # R15:附带"已尝试 N 个查询 + raw_pages"具体诊断信息,
+                        # 让空槽可归因到查询问题 vs 数据问题。
+                        _matched_attempt = next(
+                            (a for a in _sub_topic_attempts if a.get(
+                                "sub_topic_id",
+                            ) == _sec.section_id),
+                            None,
+                        )
+                        _attempt_detail = ""
+                        if _matched_attempt:
+                            _tried = _matched_attempt.get("queries_tried") or []
+                            _raw_pages = _matched_attempt.get("raw_pages", 0)
+                            _attempt_detail = (
+                                f" — 已尝试 {len(_tried)} 个查询 / "
+                                f"抓取 {_raw_pages} 页"
+                            )
                         out.unresolved_sections.append({
                             "section_id": _sec.section_id,
                             "title": _sec.title,
                             "reason": "no EU flowed into this slot — "
-                                      "source_router 未命中/ontology 缺覆盖/预期 numeric 但 LLM 未抽到数字",
+                                      "source_router 未命中/ontology 缺覆盖/预期 numeric 但 LLM 未抽到数字"
+                                      + _attempt_detail,
                         })
                     _section_results.append(SectionResult(
                         section_id=_sec.section_id,

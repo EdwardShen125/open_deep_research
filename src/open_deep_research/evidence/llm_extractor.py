@@ -258,11 +258,18 @@ async def extract_from_search_results_with_llm(
     extractor_model: str = "extractor_v1",
     content_key: str = "raw_content",
     fallback_content_keys: tuple[str, ...] = ("summary", "content"),
+    expected_claim_type: Optional[str] = None,
 ) -> list[EvidenceUnitV2]:
     """对一批 search result 抽 EU。
 
     content 优先取 `raw_content`(Crawl4AI 抓全文后的字段),降级到
     `summary` / `content`(Tavily 已有)。
+
+    R11:透传 expected_claim_type 到每页抽取 — 让 LLM 知道这次抽取"服务于什么
+    claim_type"(numeric / event / attribute 等),而不是从单页内容自由发挥。
+    这是 slot-aware 抽取的关键:之前 LLM 被要求"抽这页所有论断",所以 arxiv
+    AutoRestTest 的 67.09 个服务器错误被当合法 quantitative claim 抽出来,
+    污染了 market_size 槽。
     """
     rid = UUID(run_id) if isinstance(run_id, str) else run_id
     out: list[EvidenceUnitV2] = []
@@ -289,6 +296,7 @@ async def extract_from_search_results_with_llm(
             sub_query=sub_query,
             llm=llm,
             extractor_model=extractor_model,
+            expected_claim_type=expected_claim_type,
         )
         out.extend(eus)
     return out
