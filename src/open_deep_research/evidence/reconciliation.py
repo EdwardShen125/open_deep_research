@@ -57,13 +57,13 @@ class ClaimCluster(BaseModel):
 def _cluster_key(c: ClaimV3) -> ClusterKey:
     """构造聚簇 key(plan D1:必须含 caliber_id)。
 
-    metric_type: c.claim_type 或 'unknown'(未分类)
-    entity: c.source_domain 或 'unknown'
+    metric_type: c.metric_type 或 'unknown'(R9:不再是 c.claim_type)
+    entity: c.entity(主语) 或 'unknown'(R9:不再是 c.source_domain)
     time_window: c.value_as_of.year (或 'unknown')
     caliber_id: c.caliber_id 或 'unknown'
     """
-    metric_type = getattr(c, "claim_type", None) or "unknown"
-    entity = c.source_domain or "unknown"
+    metric_type = getattr(c, "metric_type", None) or "unknown"
+    entity = getattr(c, "entity", None) or "unknown"
     if c.value_as_of:
         time_window = str(c.value_as_of.year if isinstance(c.value_as_of, datetime) else c.value_as_of.year)
     else:

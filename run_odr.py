@@ -266,6 +266,17 @@ async def _run(args) -> int:
           file=sys.stderr)
 
     t0 = time.time()
+    # R6/R7:为 W3 llm_extractor + W9/W10 综合层注入真 LLM 客户端;
+    # 失败/缺 key → 退化为 None,trigger plan_v2_pipeline 的显式 degraded。
+    try:
+        from open_deep_research.llm import get_llm
+        _llm = get_llm()
+        if _llm is None:
+            print("[run_odr] WARNING: get_llm() returned None (R6/R7 degraded path)", file=sys.stderr)
+    except Exception as _e:
+        print(f"[run_odr] WARNING: get_llm() raised: {_e} (R6/R7 degraded path)", file=sys.stderr)
+        _llm = None
+
     try:
         result = await run_pipeline_resumable(
             query=args.brief,
@@ -282,6 +293,8 @@ async def _run(args) -> int:
             instance_market=args.market,
             instance_category=args.category,
             instance_year=args.year,
+            # R6/R7
+            llm=_llm,
         )
     except Exception as e:
         print(f"[run_odr] PIPELINE FAILED: {e}", file=sys.stderr)
@@ -331,7 +344,24 @@ async def _run(args) -> int:
         file=sys.stderr,
     )
 
-    md = render_markdown(result, args.brief, pg_summary)
+    # 任务书 §5:W9/W10 reduce-tree 产出 assembled_markdown;若存在则优先用
+    # (render_markdown 是 W7 旧产物,我们不替换它,只是新增 W9/W10 长报告优先路径)
+    md_assembled = getattr(result, "assembled_markdown", None)
+    if md_assembled:
+        md = md_assembled
+        # 附加一段 Status 元信息(原 render_markdown 干的活)
+        status_block = (
+            f"<!-- status: run_id={result.run_id} | "
+            f"EU={len(result.evidence_units)} claims={len(result.claims)} "
+            f"summaries={len(getattr(result, 'section_summaries', []))} "
+            f"crosscuts={len(getattr(result, 'crosscuts', []))} "
+            f"exec={'yes' if getattr(result, 'exec_summary', None) else 'no'} "
+            f"passed={result.passed} degraded={result.degraded} "
+            f"reconciliations={len(getattr(result, 'reconciliations', []))} -->\n\n"
+        )
+        md = status_block + md
+    else:
+        md = render_markdown(result, args.brief, pg_summary)
     if args.output:
         Path(args.output).write_text(md, encoding="utf-8")
         print(f"[run_odr] wrote {args.output} ({len(md)} chars)", file=sys.stderr)
@@ -341,6 +371,18 @@ async def _run(args) -> int:
 
 
 def main():
+    # R1-class regression fix: run_odr 启动时主动加载 .env,不再依赖外部 shell
+    # 必须先 source .env — W9/W10 综合层 LLM 调用才拿得到 MINIMAX_API_KEY。
+    # 若 .env 不存在则 fallback(不影响 fixture mode)。
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path as _P
+        _env_path = _P(__file__).resolve().parent / ".env"
+        if _env_path.exists():
+            load_dotenv(_env_path, override=False)
+    except Exception as _env_e:
+        print(f"[run_odr] .env load skipped: {_env_e}", file=sys.stderr)
+
     p = argparse.ArgumentParser(
         description="ODR end-to-end runner (planner → search → EU → verifier → RDO)"
     )

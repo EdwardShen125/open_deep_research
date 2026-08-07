@@ -62,6 +62,12 @@ class EvidenceUnitV2(BaseModel):
     )
     claim_type: ClaimType
     entities: list[str] = Field(default_factory=list)
+    # R6 新增:对账聚簇键。标准化词汇,见 prompts/extractor_v1.py。
+    metric_type: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="对账聚簇标准化键:market_size/penetration/share/.../other",
+    )
 
     # 数值单列存储:冲突检测靠结构化字段,不靠文本比对
     norm_value: Optional[Decimal] = None

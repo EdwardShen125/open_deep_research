@@ -90,32 +90,158 @@ class FilledSlot(BaseModel):
 # =============================================================================
 
 class SectionResult(BaseModel):
-    """一个 section 的填槽结果。
+    """一个 section 的填槽结果(L0 填槽层)。
 
     注:plan B2 未定义 markdown 字段,渲染产物由 B3/E1 在输出端构造,不进 schema。
+
+    W9-L1 扩展:本结构每个 FilledSlot 自带 slot_id 与 claim ids(ClaimV3.value
+    作 claim_id 兜底),综合层溯源全靠它。
     """
 
     section_id: str = Field(min_length=1, max_length=128)
     title: str = Field(min_length=1, max_length=200)
     slots: list[FilledSlot] = Field(default_factory=list)
 
+    def all_slot_ids(self) -> list[str]:
+        return [s.slot_id for s in self.slots]
+
+    def all_claim_ids(self) -> list[str]:
+        # ClaimV3 没有 stable id 字段;用 (source_url, value, tier) 元组 dedup,
+        # 综合层溯源到 "claim 引用点" 而非 claim_id 字符串。
+        ids: list[str] = []
+        for s in self.slots:
+            for c in s.claims:
+                ids.append(f"{c.source_url}::{c.value[:40]}")
+        return ids
+
+
+# =============================================================================
+# W9-L1: SectionSummary — 章节综合层(L1)
+# =============================================================================
+
+
+class SectionSummary(BaseModel):
+    """L1 章节小结层。
+
+    综合自 L0 一节的所有 FilledSlot,**不重新拉 EU 池**。
+    summary_md 必须显式标 "(summarizing N slots)" 或嵌入 source_slot_ids。
+
+    is_stub 字段:W9/W10 兜底路径标记 — LLM 返空时为 True,plan_v2_pipeline
+    据此设 degraded=True / passed=False(任务书 §0.2 不糊弄)。
+    """
+
+    section_id: str = Field(min_length=1, max_length=128)
+    summary_md: str = Field(min_length=1, max_length=20000)
+    source_slot_ids: list[str] = Field(default_factory=list)
+    key_claim_ids: list[str] = Field(default_factory=list)
+    is_stub: bool = False
+
+    @model_validator(mode="after")
+    def _source_slots_nonempty(self) -> "SectionSummary":
+        if not self.source_slot_ids:
+            raise ValueError(
+                f"SectionSummary {self.section_id!r} must declare source_slot_ids "
+                "(W9-L1 non-negotiable: every summary must trace to slots)"
+            )
+        return self
+
+
+# =============================================================================
+# W9-L2: CrossCut — 跨切综合层(L2)
+# =============================================================================
+
+CrossCutKind = Literal["comparison_table", "analysis"]
+
+
+class CrossCut(BaseModel):
+    """L2 跨切综合层。
+
+    kind=comparison_table:必须挂 reconciliation_ids(口径感知,跨口径标"不可比")
+    kind=analysis:可挂 structural_judgment 标(超出 claim 支撑的定论必须显式标注)
+    """
+
+    crosscut_id: str = Field(min_length=1, max_length=128)
+    kind: CrossCutKind
+    md: str = Field(min_length=1, max_length=20000)
+    source_section_ids: list[str] = Field(default_factory=list)
+    reconciliation_ids: list[str] = Field(default_factory=list)
+    is_structural_judgment: bool = False
+    is_stub: bool = False  # W9/W10 兜底路径标记(L2 LLM 返空时为 True)
+
+    @model_validator(mode="after")
+    def _kind_invariants(self) -> "CrossCut":
+        # 非交涉 1:comparison_table 必须挂对账记录;analysis 标注要走 structural_judgment
+        if self.kind == "comparison_table" and not self.reconciliation_ids:
+            raise ValueError(
+                f"CrossCut {self.crosscut_id!r} kind='comparison_table' "
+                "must declare reconciliation_ids (caliber-aware invariant)"
+            )
+        if self.is_structural_judgment and "结构性判断" not in self.md and "structural" not in self.md.lower():
+            raise ValueError(
+                f"CrossCut {self.crosscut_id!r} is_structural_judgment=True "
+                "must explicitly mark '结构性判断' in md (render-time guard)"
+            )
+        return self
+
+
+# =============================================================================
+# W10: ExecSummary — 执行摘要层(L3)
+# =============================================================================
+
+
+class ExecSummary(BaseModel):
+    """L3 执行摘要。
+
+    整篇报告的最顶层产物。生成在 L1/L2 之后,只能从摘要合成。
+    """
+
+    one_liner: str = Field(min_length=1, max_length=1000)
+    key_points: list[str] = Field(default_factory=list)
+    source_section_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _source_sections_nonempty(self) -> "ExecSummary":
+        if not self.source_section_ids:
+            raise ValueError(
+                "ExecSummary must declare source_section_ids "
+                "(W10: every key_point must trace back)"
+            )
+        if not self.key_points:
+            raise ValueError(
+                "ExecSummary must have at least one key_point"
+            )
+        return self
+
 
 # =============================================================================
 # ReportResult
 # =============================================================================
 
+
 class ReportResult(BaseModel):
-    """最终报告结构化产物(plan B2)。
+    """最终报告结构化产物(plan B2 + W9/W10 扩展)。
 
     unresolved 永远存在(plan DoD:未填/待核实槽显式暴露,不沉默)。
     即使没有未填槽,unresolved=[] 也保留字段(validator 不拒)。
+
+    W9/W10 扩展:加 L1 / L2 / L3 三层综合层字段 — 渲染端按
+    [exec_summary, sections(L0), section_summaries(L1), crosscuts(L2)] 顺序输出。
     """
 
     title: str = Field(min_length=1, max_length=500)
     vertical_id: str = Field(min_length=1, max_length=64)
     sections: list[SectionResult] = Field(default_factory=list)
+    # L1 章节小结
+    section_summaries: list[SectionSummary] = Field(default_factory=list)
+    # L2 跨切(对照表 + 分析)
+    crosscuts: list[CrossCut] = Field(default_factory=list)
+    # L3 执行摘要(整篇最前)
+    exec_summary: Optional[ExecSummary] = None
     unresolved: list[str] = Field(default_factory=list)  # 未填/待核实 slot_id 列表
     honest_pass: Optional[dict] = None  # E1 填
+    # 长报告装配产物(由 plan_v2_pipeline L5 装配步骤写入)
+    assembled_markdown: Optional[str] = None
+    degraded: bool = False  # W5 降级保留
 
     @model_validator(mode="after")
     def _unresolved_always_present(self) -> "ReportResult":

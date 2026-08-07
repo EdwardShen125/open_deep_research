@@ -133,6 +133,8 @@ async def _stage_extract(state: dict, ctx: dict) -> dict:
         instance_market=state.get("instance_market"),
         instance_category=state.get("instance_category"),
         instance_year=state.get("instance_year"),
+        # R6/R7:透传 llm 客户端到 W3 llm_extractor + W9/W10 综合层
+        llm=state.get("llm"),
     )
     state["plan_v2_result"] = result
     state["stages_completed"] = state.get("stages_completed", []) + ["extract"]
@@ -265,6 +267,8 @@ async def run_pipeline_resumable(
     instance_market: Optional[str] = None,
     instance_category: Optional[str] = None,
     instance_year: Optional[int] = None,
+    # R6/R7:LLM client 透传到 W3 llm_extractor + W9/W10 综合层
+    llm: Optional[Any] = None,
 ) -> PlanV2RunResult:
     """以 ResearchJob 5-stage 模式跑 plan_v2 pipeline。
 
@@ -300,6 +304,7 @@ async def run_pipeline_resumable(
         "instance_market": instance_market,
         "instance_category": instance_category,
         "instance_year": instance_year,
+        "llm": llm,
     }
     final_state = await job.run(run_id, initial_state=initial_state)
     result = final_state.get("plan_v2_result")

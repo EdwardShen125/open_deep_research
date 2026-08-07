@@ -64,8 +64,9 @@ from open_deep_research.cited_report import (
     CITED_REPORT_PROMPT,
 )
 from open_deep_research.evidence_units import (
-    EvidenceUnit, eus_as_dicts, dedup_eus,
+    EvidenceUnit, NumberBinding, eus_as_dicts, dedup_eus,
 )
+from open_deep_research.evidence.schema import EvidenceUnitV2
 from open_deep_research.verifier import (
     verify, VerificationResult,
 )
@@ -81,6 +82,85 @@ from open_deep_research.evidence.pipeline import build_claims_from_eus
 from open_deep_research.evidence.tier_classifier import classify_tier as _classify_tier_abc
 # W3: A/B/C/D tier (cognitive authority) → SourceTier (primary/secondary/...)
 _TIER_ABC_TO_SOURCE = {"A": "primary", "B": "secondary", "C": "tertiary", "D": "ugc"}
+
+
+# =============================================================================
+# R6 helpers: V2 → V1 转换,保留 metric_type 信息给 reconciliation
+# =============================================================================
+
+
+def _v2_to_v1(eu_v2: EvidenceUnitV2) -> EvidenceUnit:
+    """把 LLM 抽取器产出的 EvidenceUnitV2 转成下游消费的 V1 dataclass。
+
+    设计妥协:downstream(cited_report / verifier / W6 reconciliation 旧路径)期望
+    V1 字段集(.numbers / .claim / .quote / .source_url / .dimension_id)。
+    V2 的 metric_type / entities / source_span / source_tier 通过 V1 字段透传:
+    - metric_type → extraction_method 后缀(给 reconciler 解析用)
+    - entities → V1.entities(每个转为 EntityRef)
+    - source_span → V1.quote
+    - source_tier → V1.source_tier
+    """
+    from open_deep_research.evidence_units import EntityRef
+
+    # claim 截断 ≤500 chars(V1 __post_init__ 强校验)
+    claim = (eu_v2.claim or "").strip()
+    if len(claim) > 500:
+        claim = claim[:497] + "..."
+
+    numbers: list[NumberBinding] = []
+    if eu_v2.norm_value is not None and eu_v2.unit:
+        try:
+            numbers.append(NumberBinding(
+                text=str(eu_v2.norm_value) + " " + str(eu_v2.unit),
+                value_min=float(eu_v2.norm_value),
+                value_max=float(eu_v2.norm_value),
+                unit=str(eu_v2.unit),
+                is_estimated=False,
+            ))
+        except Exception:
+            pass
+
+    # R6:把 metric_type 编码到 extraction_method,让 reconciler 能取
+    method_suffix = f"|metric={eu_v2.metric_type or 'unknown'}"
+    extraction_method = (eu_v2.extractor_model or "llm_extractor_v1") + method_suffix
+
+    # R6:entity_type heuristic — 公司类(V2.entities 里含 "公司/Co./Inc./集团/科技" 等关键词)
+    return EvidenceUnit(
+        claim=claim,
+        source_url=eu_v2.source_url,
+        quote=eu_v2.source_span,
+        source_title=eu_v2.source_title,
+        numbers=numbers,
+        entities=[
+            EntityRef(name=e, entity_type=_infer_entity_type(e))
+            for e in (eu_v2.entities or [])
+        ],
+        confidence=0.7,
+        extraction_method=extraction_method,
+        run_id=str(eu_v2.run_id) if eu_v2.run_id else None,
+        dimension_id=eu_v2.dimension_id,
+        source_tier=eu_v2.source_tier,
+    )
+
+
+_COMPANY_HINTS = ("公司", "集团", "科技", "Co.", "Inc.", "Corp", "厂商", "厂商")
+
+
+def _infer_entity_type(name: str) -> str:
+    """启发式:V2.entities 的 name → V1.entity_type。
+
+    公司类:含公司/集团/科技/Co./Inc./Corp
+    产品类:含 EDR/产品/平台/系统
+    metric:含 规模/份额/CAGR/率
+    其余:unknown
+    """
+    if any(h in name for h in _COMPANY_HINTS):
+        return "company"
+    if any(h in name for h in ("EDR", "产品", "平台", "系统", "aES")):
+        return "product"
+    if any(h in name for h in ("规模", "份额", "CAGR", "率", "USD", "亿元", "%")):
+        return "metric"
+    return "unknown"
 
 
 # =============================================================================
@@ -102,6 +182,8 @@ class PlanV2RunResult:
     planner: Optional[PlannerPlan] = None
     search_responses: list[dict[str, Any]] = field(default_factory=list)  # per sub-topic
     evidence_units: list[EvidenceUnit] = field(default_factory=list)
+    # R6:保留 V2 列表(带 metric_type / entities / norm_value)给 reconciliation
+    evidence_units_v2: list[Any] = field(default_factory=list)
     claims: list[Any] = field(default_factory=list)  # ClaimV2 (跨源归并)
     claim_grade_dist: dict[str, int] = field(default_factory=dict)  # {A: N, B: N, C: N, D: N}
     cited_report: Optional[CitedReport] = None
@@ -111,6 +193,14 @@ class PlanV2RunResult:
     url_compliance: list[UrlComplianceIssue] = field(default_factory=list)
     gate_stats: dict[str, int] = field(default_factory=dict)  # 闸 1+2+3 命中统计
     honest_pass: Optional[dict] = None  # W8:honest_pass 收口(unverified/caliber/source_pages)
+    # W9-L2 输入:W6 产出的 ReconciliationRecord 列表(跨切综合层读它)
+    reconciliations: list[Any] = field(default_factory=list)
+
+    # W9/W10 reduce-tree 产物(任务书 §5 装配)
+    section_summaries: list[Any] = field(default_factory=list)
+    crosscuts: list[Any] = field(default_factory=list)
+    exec_summary: Optional[Any] = None
+    assembled_markdown: Optional[str] = None  # 长报告最终 markdown
 
     passed: bool = False
     error: Optional[str] = None
@@ -118,6 +208,9 @@ class PlanV2RunResult:
     # section_writer 不可用时 degrade=True + passed=False,确保 golden-eval main
     # gate 不把降级 placeholder 当成 pass。
     degraded: bool = False
+
+    # R10:未解析的 slot(section) — 报告装配时显式标"数据不足",不留无声空标题。
+    unresolved_sections: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -166,6 +259,9 @@ async def run_pipeline(
     instance_market: Optional[str] = None,
     instance_category: Optional[str] = None,
     instance_year: Optional[int] = None,
+    # R6/R7:LLM client 透传给 W3 llm_extractor 与 W9/W10 综合层;
+    # 若 None → run_odr.py 调 get_llm() 兜底 → 仍 None 则 fallback 规则抽取器 + degraded。
+    llm: Optional[Any] = None,
 ) -> PlanV2RunResult:
     """Run the full plan_v2 stack and return a typed result.
 
@@ -233,7 +329,11 @@ async def run_pipeline(
             sources_dao=sources_dao,
         )
         all_eus: list[EvidenceUnit] = []
+        # R6:本批 EU(V2 + 已配 slot.section_id)的临时累加器
+        _batch_v2: list[EvidenceUnitV2] = []
+        _batch_v2_with_dim: list[tuple[str, EvidenceUnitV2]] = []
         for st in plan.sub_topics:
+            _slot_dim: str = st.id or st.dimension_id or "unknown"
             # ----- W2: source_router + acquirer 定向取证(每槽优先)-----
             # 旧路径:qc_construct(st) LLM 自由发散
             # 新路径:framework 存在时,从 Slot 派生定向查询;失败/无 framework → 旧 LLM 兜底
@@ -408,27 +508,95 @@ async def run_pipeline(
                 "intents": intent_outcomes,
             })
 
-            # 2c. Extract EUs from the merged raw set (one extractor call —
-            #     dedup is internal to the extractor + EU DAO).
+            # 2c. Extract EUs from the merged raw set.
+            # R6 ★:真 LLM 抽取器。旧路径 extract_from_search_results 是规则抽取
+            # (直接拿 search snippet 切,没有 LLM 综合判断,导语/SEO 全进 EU)。
+            # 新路径:对每页调 LLM 抽 EU + metric_type/norm_value/entities 全套 schema,
+            # quantitative 槽强校验 norm_value+unit,缺失直接丢弃(避免定义句
+            # 灌进 TAM/SAM 槽)。
             if not raws:
                 continue
-            # P1 fix: pass the original brief as `research_topic` so the cyber
-            # guard (cybersecurity-context keyword filter) can enable itself.
-            # Passing `st.title` (e.g. "market_size") defeats the guard.
-            eus = extract_from_search_results(
-                raws,
-                run_id=rid,
-                sources_dao=sources_dao,
-                research_topic=query,           # was st.title — guard was disabled
-                dimension_id=st.dimension_id,
-            )
+            # 从当前 sub_topic 派生 slot 的 expected_claim_type:heuristic —
+            # market_size 类槽标 numeric,其余(qualitative/attribute)让 LLM 自决。
+            sub_dim = (st.dimension_id or "").lower()
+            if any(k in sub_dim for k in ("market_size", "sam", "tam", "share", "growth", "revenue", "gmv", "sku_rank", "penetration")):
+                expected_claim_type: Optional[str] = "numeric"
+            else:
+                expected_claim_type = None
+            try:
+                from open_deep_research.evidence.llm_extractor import (
+                    extract_from_search_results_with_llm,
+                )
+                if llm is not None:
+                    # R6 限流:每 sub_topic 最多 10 个 search result 走 LLM 抽取
+                    # (否则 4 sub_topic × 176 results × 8s/call = 1.5h+)。
+                    # 经验值:Top 10 已能覆盖 ≥1 条 numeric EU,降本 17×。
+                    _raws_capped = raws[:10]
+                    eus_v2 = await extract_from_search_results_with_llm(
+                        _raws_capped,
+                        run_id=rid,
+                        llm=llm,
+                        sub_query=st.question,
+                        extractor_model="extractor_v1",
+                    )
+                    # R6 ★:EU.dimension_id → framework.sections[i].section_id(宽标签,
+                    # 如 market_size__tam),与 W7 (plan_v2_pipeline:478) 配对规则一致。
+                    # 之前用 st.id(如 market_size__market_size__tam__tam_total)不匹配,
+                    # W9 L0 装配时 _eu_per_section[sec.section_id] 找不到任何 EU,全部标 unresolved。
+                    # st.dimension_id 是 planner 写入的宽标签,framework section_id 同源。
+                    for _eu in eus_v2:
+                        _eu.dimension_id = st.dimension_id or _slot_dim
+                    # V2 → V1 转换:downstream 仍消费 V1 dataclass
+                    # (写者/对账都期望 .numbers/.claim/.source_url/.dimension_id)
+                    eus = [_v2_to_v1(_e) for _e in eus_v2]
+                    # 把 V2 列表暂存到 ctx-style 临时容器,本 sub_topic 结束后并入 out
+                    _batch_v2.extend(eus_v2)
+                    logger.info(
+                        "[W3 R6] llm_extractor sub_topic=%s ect=%s raw_results=%d (capped=10) v2_eus=%d v1_eus=%d",
+                        st.id, expected_claim_type, len(raws), len(eus_v2), len(eus),
+                    )
+                else:
+                    logger.warning(
+                        "[W3 R6] llm=None, falling back to deterministic extractor (degraded)"
+                    )
+                    out.degraded = True
+                    eus = extract_from_search_results(
+                        raws,
+                        run_id=rid,
+                        sources_dao=sources_dao,
+                        research_topic=query,
+                        dimension_id=st.id or st.dimension_id,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[W3 R6] llm_extractor failed (sub_topic=%s): %s; falling back to rule extractor (degraded)",
+                    st.id, e,
+                )
+                out.degraded = True
+                eus = extract_from_search_results(
+                    raws,
+                    run_id=rid,
+                    sources_dao=sources_dao,
+                    research_topic=query,
+                    dimension_id=st.id or st.dimension_id,
+                )
             all_eus.extend(eus)
+            # R6:本批 V2 累加
+            _batch_v2_with_dim.extend(
+                [(_slot_dim, _e) for _e in _batch_v2]
+            )
+            _batch_v2.clear()
 
+        # R6:写 out.evidence_units_v2(dimension_id 已配好 slot.section_id)
+        if _batch_v2_with_dim:
+            out.evidence_units_v2 = [_e for _, _e in _batch_v2_with_dim]
         out.evidence_units = dedup_eus(all_eus)
-        logger.info("extracted %d unique EU across %d sub-topics (with %d dimensioned)",
-                    len(out.evidence_units),
-                    len(plan.sub_topics),
-                    sum(1 for s in plan.sub_topics if s.dimension_id))
+        logger.info(
+            "extracted %d unique EU across %d sub-topics (with %d dimensioned)",
+            len(out.evidence_units),
+            len(plan.sub_topics),
+            sum(1 for s in plan.sub_topics if s.dimension_id),
+        )
 
         if not out.evidence_units:
             out.error = "no evidence units extracted"
@@ -688,25 +856,51 @@ async def run_pipeline(
                 from open_deep_research.evidence.caliber_registry import (
                     load_caliber_registry as _w6_load_calibers,
                 )
+                # R9:calibers 按 ontology/registry_vertical 加载(原写死 us_livecommerce
+                # 导致 cn_cybersec run 永远 calibers=None → primary_caliber_id='unknown')。
+                _caliber_vertical = (
+                    registry_vertical or ontology or vertical or "us_livecommerce"
+                )
                 try:
-                    calibers = _w6_load_calibers("us_livecommerce")
+                    calibers = _w6_load_calibers(_caliber_vertical)
                 except FileNotFoundError:
                     calibers = None
+                # R9:CaliberRegistry.by_metric(metric_type) 找最匹配的 caliber_id
+                # 优先 metric_type 全等,次选 metric_type 任意子串;找不到 → None
+                def _pick_caliber_id(
+                    metric_type: Optional[str], entity: Optional[str],
+                ) -> Optional[str]:
+                    if calibers is None or not metric_type:
+                        return None
+                    # 1) 全等 + entity 子串
+                    for c in calibers.calibers:
+                        if c.metric_type == metric_type:
+                            if not entity or entity.lower() in c.entity.lower():
+                                return c.id
+                    # 2) 全等(忽略 entity)
+                    for c in calibers.calibers:
+                        if c.metric_type == metric_type:
+                            return c.id
+                    return None
+
                 # 建 slot_id → framework slot 的映射(W4 已存 framework)
                 fw_slot_by_id: dict[str, Any] = {}
                 if framework is not None:
                     for sec in framework.sections:
                         for sl in sec.slots:
                             fw_slot_by_id[sl.slot_id] = sl
-                # 从 v2_eus 派生 ClaimV3(EU 没存 caliber_id,从 framework 取)
+                # 从 v2_eus 派生 ClaimV3 — R9:metric_type / entity 透传,
+                # caliber_id 从 CaliberRegistry by_metric 派生(替代之前写 None)。
                 claim_v3_for_recon: list[ClaimV3] = []
                 for eu in v2_eus:
                     if eu.norm_value is None:
                         continue
-                    _cal = None
-                    if framework is not None:
-                        _cal = fw_slot_by_id.get(eu.dimension_id or "", None)
-                        # EU 没存 slot_id,只能 dimension 匹配(section_id)
+                    # R9 强约束:无 metric_type / 无 entity 的 EU 不进对账(unknown 不可比对)。
+                    if not eu.metric_type or eu.metric_type == "other":
+                        continue
+                    if not eu.entities:
+                        continue
+                    _cal = _pick_caliber_id(eu.metric_type, eu.entities[0])
                     claim_v3_for_recon.append(ClaimV3(
                         value=str(eu.norm_value),
                         norm_value=float(eu.norm_value),
@@ -717,7 +911,10 @@ async def run_pipeline(
                         tier=("A" if eu.source_tier == "primary" else
                               "B" if eu.source_tier == "secondary" else
                               "C" if eu.source_tier == "tertiary" else "D"),
-                        caliber_id=None,
+                        # R9:caliber_id 真匹配 metric_type + entity(替代写死 None)
+                        caliber_id=_cal,
+                        metric_type=eu.metric_type,
+                        entity=eu.entities[0] if eu.entities else None,
                         verification_status=(
                             "verified" if eu.span_verified and not eu.numeric_drift
                             and (eu.entailment_verdict == "entailed") else "to_verify"
@@ -741,6 +938,8 @@ async def run_pipeline(
                                 rec.divergence_kind,
                                 len(rec.alternatives),
                             )
+                            # W9-L2 输入:把 rec 收集到 out.reconciliations
+                            out.reconciliations.append(rec)
                         except Exception as rec_e:
                             logger.warning(
                                 "[W6] reconcile_cluster failed: %s",
@@ -802,6 +1001,240 @@ async def run_pipeline(
         else:
             out.url_compliance = enforce_page_level(rdo)
 
+        # ----- 6b. W9 / W10 · 写作 reduce 树(任务书 §5)-----
+        # 顺序:L0 (已在 W7 写过) → L1 synthesize_section → L2 synthesize_crosscuts → L3 write_exec_summary → 装配
+        # 任一层 LLM 不可用 → degraded=True / passed=False(R5 保留)
+        # W7 旧逐槽 path 继续产出 cited_report(不替换);此处是新长报告路径。
+        try:
+            from open_deep_research.evidence.report_result import (
+                CrossCut, ExecSummary, SectionResult, SectionSummary, FilledSlot,
+            )
+            from open_deep_research.evidence.section_writer import (
+                synthesize_section_async,
+                synthesize_crosscuts_async,
+                write_exec_summary_async,
+            )
+            from open_deep_research.evidence.claim_v3 import ClaimV3 as _ClaimV3_W9
+
+            # 把 EU 池转成 ClaimV3,按 dimension_id 分组给每节
+            _eu_per_section: dict[str, list[Any]] = {}
+            for _eu in v2_eus:
+                _key = _eu.dimension_id or "_unassigned"
+                _eu_per_section.setdefault(_key, []).append(_eu)
+
+            # L0 → SectionResult(按 framework.sections 顺序)
+            # 每个 framework.section 一个 SectionResult;
+            # 该 section 内所有 EU 合并为一个 FilledSlot(代表本节综合证据池)。
+            # 限制:framework.slot_id 是细粒度(如 dossier__qax__overview),
+            #       但 EU.dimension_id 仅 section 级(W7 既定配对规则),所以这里
+            #       也按 section 级合并 — 与 W7 (plan_v2_pipeline:478) 一致。
+            _section_results = []
+            # R7 ★:用 run_odr.py 注入的 llm;不再默认 None 触发 stub 静默兜底。
+            # 若 llm is None → synthesize_section_async 内部 get_llm() 仍可用(MiniMax 有 key);
+            # 真没 key → section_writer 已抛 → plan_v2_pipeline 进入 degraded 路径(已配)。
+            _llm_w9 = llm  # type: ignore[assignment]
+            if framework is not None and framework.sections:
+                for _sec in framework.sections:
+                    _sec_eus = _eu_per_section.get(_sec.section_id, [])
+                    _filled_slots: list[FilledSlot] = []
+                    if _sec_eus:
+                        # 同 dim EU 收成一槽(L0 单槽映射)
+                        _v3_multi = [
+                            _ClaimV3_W9(
+                                value=e.claim[:200],
+                                source_id=str(e.eu_id),
+                                source_url=e.source_url,
+                                source_domain=e.source_domain,
+                                source_title=e.source_title,
+                                tier=("A" if e.source_tier == "primary" else
+                                      "B" if e.source_tier == "secondary" else
+                                      "C" if e.source_tier == "tertiary" else "D"),
+                                caliber_id=None,
+                                verification_status=("verified" if e.span_verified
+                                                     and not e.numeric_drift else "to_verify"),
+                            )
+                            for e in _sec_eus[:10]  # bounded k=10(任务书 §0.2)
+                        ]
+                        from open_deep_research.evidence.report_result import (
+                            derive_confidence as _derive_conf,
+                        )
+                        _filled_slots.append(FilledSlot(
+                            slot_id=_sec.section_id,
+                            claims=_v3_multi,
+                            confidence=_derive_conf(_v3_multi),
+                        ))
+                    else:
+                        # R10 ★:空 section 显式记入 unresolved(不留无声空标题)。
+                        # 报告装配时 render 标题 + "(数据不足)" 标注。
+                        out.unresolved_sections.append({
+                            "section_id": _sec.section_id,
+                            "title": _sec.title,
+                            "reason": "no EU flowed into this slot — "
+                                      "source_router 未命中/ontology 缺覆盖/预期 numeric 但 LLM 未抽到数字",
+                        })
+                    _section_results.append(SectionResult(
+                        section_id=_sec.section_id,
+                        title=_sec.title,  # framework.title 在 build_plan 已渲染过
+                        slots=_filled_slots,
+                    ))
+
+            # L1 · synthesize_section(每节小结)
+            _summaries: list[SectionSummary] = []
+            for _sr in _section_results:
+                if not _sr.slots:
+                    continue
+                try:
+                    _sm = await synthesize_section_async(_sr, llm=_llm_w9)
+                    _summaries.append(_sm)
+                except Exception as w9l1_e:
+                    logger.warning("[W9-L1] %s failed: %s — degraded (continuing)", _sr.section_id, w9l1_e)
+                    out.degraded = True
+                    out.passed = False
+                    out.cited_report_warnings.append(
+                        f"W9-L1 degrade: {_sr.section_id}: {w9l1_e}"
+                    )
+                    # 改 break → continue:任一节失败不影响后续节
+                    # 任务书 §0.2:综合层 LLM 不可用 → degraded=True / passed=False;
+                    # 失败节留空,其他节仍可综合。
+            out.section_summaries = _summaries
+
+            # L2 · synthesize_crosscuts(对照表 + 分析)
+            # 任务书 §7:framework.crosscuts 优先;默认 2 条兜底
+            _fw_crosscuts = (
+                framework.crosscuts if (framework is not None and framework.crosscuts) else None
+            )
+            _crosscuts: list[CrossCut] = []
+            if _summaries:
+                try:
+                    _crosscuts = await synthesize_crosscuts_async(
+                        _summaries,
+                        out.reconciliations,
+                        crosscut_specs=_fw_crosscuts,  # 任务书 §7
+                        llm=_llm_w9,
+                    )
+                except Exception as w9l2_e:
+                    logger.warning("[W9-L2] crosscuts failed: %s — degraded", w9l2_e)
+                    out.degraded = True
+                    out.passed = False
+                    out.cited_report_warnings.append(
+                        f"W9-L2 degrade: {w9l2_e}"
+                    )
+            out.crosscuts = _crosscuts
+
+            # §6 · 任一综合层 is_stub=True → degraded=True / passed=False
+            # (任务书 §0.2 不糊弄:综合层 LLM 不可用必须如实标记)
+            if any(getattr(s, "is_stub", False) for s in _summaries):
+                out.degraded = True
+                out.passed = False
+                out.cited_report_warnings.append(
+                    f"W9-L1 stub fallback: {sum(1 for s in _summaries if getattr(s, 'is_stub', False))}/{len(_summaries)} sections"
+                )
+            if any(getattr(c, "is_stub", False) for c in _crosscuts):
+                out.degraded = True
+                out.passed = False
+                out.cited_report_warnings.append(
+                    f"W9-L2 stub fallback: {sum(1 for c in _crosscuts if getattr(c, 'is_stub', False))}/{len(_crosscuts)} crosscuts"
+                )
+
+            # L3 · write_exec_summary
+            _exec: Optional[ExecSummary] = None
+            if _summaries:
+                try:
+                    _exec = await write_exec_summary_async(
+                        _summaries, _crosscuts, llm=_llm_w9,
+                    )
+                except Exception as w10_e:
+                    logger.warning("[W10] exec_summary failed: %s — degraded", w10_e)
+                    out.degraded = True
+                    out.passed = False
+                    out.cited_report_warnings.append(
+                        f"W10 degrade: {w10_e}"
+                    )
+            out.exec_summary = _exec
+
+            # 装配:按任务书 §5 顺序输出 long markdown
+            try:
+                from open_deep_research.evidence.report_result import (
+                    ReportResult as _ReportResult_W9,
+                )
+                _rr_long = _ReportResult_W9(
+                    title=rdo.title or title,
+                    vertical_id="cn_cybersec" if (ontology or "").startswith("cn") else
+                               (ontology or vertical or "unknown"),
+                    sections=_section_results,
+                    section_summaries=_summaries,
+                    crosscuts=_crosscuts,
+                    exec_summary=_exec,
+                    unresolved=[],
+                    degraded=out.degraded,
+                )
+                # 装配 markdown:exec 在最前、各节 L0+L1、crosscuts 在中、honest_pass 附录由 W8 加
+                _md_parts: list[str] = []
+                _md_parts.append(f"# {_rr_long.title}\n")
+                if _exec is not None:
+                    _md_parts.append("## 执行摘要\n")
+                    _md_parts.append(f"**{_exec.one_liner}**\n\n")
+                    for _kp in _exec.key_points:
+                        _md_parts.append(f"- {_kp}\n")
+                    _md_parts.append("\n")
+                # 各节:L0 槽 + L1 小结
+                for _sr in _section_results:
+                    _md_parts.append(f"\n## {_sr.title}\n")
+                    _md_parts.append(f"_section_id={_sr.section_id}_\n\n")
+                    for _fs in _sr.slots:
+                        for _c in _fs.claims:
+                            _md_parts.append(
+                                f"- **[{_fs.confidence}]** {_c.value} "
+                                f"([source]({_c.source_url}))\n"
+                            )
+                # L1 小结追加到每节末尾
+                for _sm in _summaries:
+                    _md_parts.append(
+                        f"\n### 小结 — {_sm.section_id}\n"
+                        f"{_sm.summary_md}\n"
+                        f"_来源 slots: {', '.join(_sm.source_slot_ids[:5])}{'…' if len(_sm.source_slot_ids) > 5 else ''}_\n"
+                    )
+                # L2 跨切
+                if _crosscuts:
+                    _md_parts.append("\n## 跨切分析\n")
+                    for _cc in _crosscuts:
+                        _tag = "结构性判断" if _cc.is_structural_judgment else "对照表"
+                        _md_parts.append(f"\n### [{_tag}] {_cc.crosscut_id}\n")
+                        _md_parts.append(f"{_cc.md}\n")
+                        _md_parts.append(
+                            f"_source sections: {', '.join(_cc.source_section_ids)}_"
+                            f"{' / reconciliation_ids: ' + ', '.join(_cc.reconciliation_ids) if _cc.reconciliation_ids else ''}_\n"
+                        )
+                # R10:未解析 sections 显式标注(不留无声空标题)
+                if out.unresolved_sections:
+                    _md_parts.append("\n## 数据不足的章节 (unresolved)\n")
+                    _md_parts.append(
+                        "以下章节无 EU 流入(可能原因:source_router 未命中 / "
+                        "ontology 缺覆盖 / 预期 numeric 但 LLM 未抽到数字):\n\n"
+                    )
+                    for _u in out.unresolved_sections:
+                        _md_parts.append(
+                            f"- **{_u['title']}** `({_u['section_id']})` — {_u['reason']}\n"
+                        )
+                out.assembled_markdown = "".join(_md_parts)
+                logger.info(
+                    "[W9/W10] assembled long markdown: %d chars, %d summaries, %d crosscuts, exec=%s",
+                    len(out.assembled_markdown), len(_summaries), len(_crosscuts),
+                    "yes" if _exec else "no",
+                )
+            except Exception as assemble_e:
+                logger.warning("[§5] assemble long markdown failed: %s", assemble_e)
+                out.degraded = True
+                out.passed = False
+        except Exception as w9_w10_e:
+            import traceback as _w9_tb
+            logger.warning(
+                "[W9/W10] reduce-tree stage skipped: %s\n%s",
+                w9_w10_e, _w9_tb.format_exc(),
+            )
+            out.degraded = True
+            out.passed = False
+
         # ----- 7a. W8 honest_pass 报告收口 -----
         # 主结论降级 + [待核实]附录 + 口径误区 + 来源页(从元数据渲染)
         try:
@@ -832,7 +1265,14 @@ async def run_pipeline(
                 sections=[],
                 unresolved=[],
             )
-            _rr = run_honest_pass(_rr, _claims_v3, reconciliations=[])  # type: ignore[arg-type]
+            _rr = run_honest_pass(
+                _rr, _claims_v3,
+                reconciliations=out.reconciliations,  # type: ignore[arg-type]
+                # §6 扩展:把 L1/L2/L3 综合层产物喂给 honest_pass 做溯源审计
+                section_summaries=out.section_summaries,
+                crosscuts=out.crosscuts,
+                exec_summary=out.exec_summary,
+            )
             out.honest_pass = _rr.honest_pass or {}
             hp_stats = out.honest_pass.get("stats", {}) if isinstance(out.honest_pass, dict) else {}
             logger.info(
@@ -849,6 +1289,10 @@ async def run_pipeline(
         out.passed = (
             verification.passes
             and not any(uc.severity == "high" for uc in out.url_compliance)
+            # R8 ★:任一层 degraded → 全局 passed=False。
+            # 之前的修复只在 W9/W10 综合层 is_stub 触发时设,但 W3 R6 fallback
+            # (llm_extractor 异常/llm=None)也会 degraded,必须联动到 passed。
+            and not out.degraded
         )
     except Exception as e:
         out.error = f"{type(e).__name__}: {e}"

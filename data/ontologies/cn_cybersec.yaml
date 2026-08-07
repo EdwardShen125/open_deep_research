@@ -16,9 +16,12 @@ entity_spaces:
   # ---- 厂商实体空间(竞争格局 archetype 用)----
   vendors:
     items:
-      - {id: qax,       name: 奇安信,   tier: A, official: qax.com.cn}
-      - {id: sangfor,   name: 深信服,   tier: A, official: sangfor.com.cn}
-      - {id: venustech, name: 启明星辰, tier: A, official: venustech.com.cn}
+      # W11 · importance 字段:头部 3 实体供 depth_expansion 展成 dossier。
+      # 0.95/0.90/0.85 是 W11 plan 阶段的 eu_volume proxy;排名 top 3 会触发
+      # 5 facet 子槽深度展开 → 各约 2 页深剖。其余保持单行式广度槽。
+      - {id: qax,       name: 奇安信,   tier: A, official: qax.com.cn,       importance: 0.95}
+      - {id: sangfor,   name: 深信服,   tier: A, official: sangfor.com.cn,   importance: 0.90}
+      - {id: venustech, name: 启明星辰, tier: A, official: venustech.com.cn, importance: 0.85}
       - {id: nsfocus,   name: 绿盟科技, tier: A, official: nsfocus.com}
       - {id: dbapp,     name: 安恒信息, tier: A, official: dbappsecurity.com.cn}
       - {id: topsec,    name: 天融信,   tier: A, official: topsec.com.cn}

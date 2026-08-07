@@ -45,6 +45,8 @@ class Archetype(BaseModel):
     description: str = ""
     sections: list[dict[str, Any]] = Field(default_factory=list)
     # Raw list (preserves `expansion` directives before instantiation)
+    # 任务书 §7:archetype 顶层 crosscuts(W9-L2 平移到 Framework.crosscuts)
+    crosscuts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class Ontology(BaseModel):
@@ -287,17 +289,35 @@ def build_plan(
                     seen_slot_ids, slots_out,
                 )
 
+            # 2.5) W11 depth_expansion: 头部 top_n 实体展成 facet 子槽
+            depth = sec_raw.get("depth_expansion")
+            if depth:
+                _emit_depth_expansion(
+                    depth, arch_id, sec_id, ctx, ontology, registry,
+                    seen_slot_ids, slots_out,
+                )
+
             sections.append(Section(
                 section_id=sec_id,
                 title=sec_title,
                 slots=slots_out,
+                # 任务书 §7:archetype section.synthesis 平移到 Section.synthesis
+                synthesis=sec_raw.get("synthesis"),
             ))
+
+    # 任务书 §7:合并所有 archetype 顶层 crosscuts 到 Framework.crosscuts
+    fw_crosscuts: list[dict] = []
+    for arch_id in archetypes:
+        arch = load_archetype(arch_id)
+        for cc in (arch.crosscuts or []):
+            fw_crosscuts.append(cc)
 
     return Framework(
         vertical_id=vid,
         title=f"{ontology.display_name or vid} — "
               f"{' × '.join(archetypes)} ({instance.year or 'any year'})",
         sections=sections,
+        crosscuts=fw_crosscuts,
     )
 
 
@@ -419,6 +439,132 @@ def _emit_expansion(
             comparison_axis=per.get("comparison_axis"),
             notes=notes,
         ))
+
+
+# =============================================================================
+# W11 · depth_expansion: 头部 top_n 实体展成多 facet 子槽
+# =============================================================================
+
+
+def _emit_depth_expansion(
+    depth: dict,
+    arch_id: str,
+    sec_id: str,
+    ctx: dict,
+    ontology: Ontology,
+    registry: Registry,
+    seen: set[str],
+    out: list[Slot],
+) -> None:
+    """W11 · dossier 深度展开。
+
+    配置形如:
+      depth_expansion:
+        source: "{ontology}.vendors"
+        top_n: 3
+        rank_by: ontology_importance    # plan 阶段无 EU 信号,默认按 ontology.importance
+        facet_slots:
+          - id: "{item_id}__overview"
+            question: "{item.name} 在 {market} 的公司简介 / 主营 / 定位"
+            expected_claim_type: qualitative
+          - id: "{item_id}__business_model"
+            question: "{item.name} 在 {market} 的商业模式 / 营收结构 / 客户群"
+          - id: "{item_id}__key_data"
+            question: "{item.name} 在 {market} 的关键运营数据(客户数/装机量/营收)"
+            expected_claim_type: quantitative
+            required_tier_min: B
+            caliber_ref: "{ontology}.financial"
+          - id: "{item_id}__pros_cons"
+            question: "{item.name} 的核心优势与短板"
+            expected_claim_type: qualitative
+          - id: "{item_id}__recent_actions"
+            question: "{item.name} 近 {year_minus_2} 年关键事件(融资/发布/并购)"
+            expected_claim_type: event
+
+    验收:头部 3 实体各生成 5 facet 子槽(→ 各约 2 页深剖);第 4+ 实体不展深度。
+    R4:facet 模板引用的 instance key 由 _render_template required_keys 覆盖。
+    """
+    src = _render_template(depth.get("source", ""), ctx)
+    space_key = src.split(".")[-1]
+    space = ontology.entity_spaces.get(space_key, {})
+    if space_key == "regulations" and not space:
+        items = list(ontology.regulations or [])
+    else:
+        items = []
+        if isinstance(space, dict) and "items" in space:
+            items = list(space["items"])
+        elif isinstance(space, list):
+            items = space
+
+    top_n = int(depth.get("top_n", 3))
+    rank_by = depth.get("rank_by", "ontology_importance")
+
+    # W11:plan 阶段拿不到 eu_volume,默认用 ontology.importance;保留 eu_volume 字段供未来 hook
+    if rank_by == "eu_volume":
+        # 未来:抽 EU 后按 volume 重排,这里兜底用 importance 或声明顺序
+        items = _rank_by_importance(items)
+    else:
+        items = _rank_by_importance(items)
+
+    head_items = items[:top_n]
+    facet_slots_raw = depth.get("facet_slots", [])
+    if not facet_slots_raw:
+        logger.warning(
+            "[composer] depth_expansion on %s/%s declared but facet_slots is empty",
+            arch_id, sec_id,
+        )
+        return
+
+    for item in head_items:
+        item_id = item.get("id") or item.get("name", "unknown")
+        item_ctx = {
+            **ctx,
+            "item": item,
+            "item_id": item_id,
+            "item.name": item.get("name", ""),
+            "item.official": item.get("official", ""),
+        }
+        for facet_raw in facet_slots_raw:
+            sid_raw = _render_template(facet_raw.get("id", ""), item_ctx)
+            full_sid = f"{arch_id}__{sec_id}__{sid_raw}"
+            if full_sid in seen:
+                continue
+            seen.add(full_sid)
+            q = _render_template(facet_raw.get("question", ""), item_ctx)
+            ct = facet_raw.get("expected_claim_type", "qualitative")
+            tier = facet_raw.get("required_tier_min")
+            notes = facet_raw.get("notes")
+
+            # Caliber 解析(与 _emit_expansion 一致)
+            caliber_id = None
+            if "caliber_ref" in facet_raw:
+                ref = _render_template(facet_raw["caliber_ref"], item_ctx)
+                ref_key = ref.split(".")[-1]
+                for c in registry.calibers:
+                    if c.get("id") == ref or c.get("metric_type") == ref_key:
+                        caliber_id = c.get("id")
+                        break
+
+            # R4:facet 模板若引用 {brand}/{market}/{category}/{year},沿用 _validate_instance 已覆盖
+            out.append(Slot(
+                slot_id=full_sid,
+                question=q,
+                expected_claim_type=ct,
+                required_tier_min=tier,
+                caliber_id=caliber_id,
+                comparison_axis=facet_raw.get("comparison_axis"),
+                notes=notes,
+            ))
+
+
+def _rank_by_importance(items: list[dict]) -> list[dict]:
+    """按 item.importance(0-1)降序;无 importance 时按声明顺序(稳定)。"""
+    def _key(item: dict) -> float:
+        try:
+            return -float(item.get("importance", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+    return sorted(items, key=_key)
 
 
 # =============================================================================

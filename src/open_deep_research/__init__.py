@@ -6,6 +6,7 @@ to langchain's default ``init_chat_model`` dispatcher.
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import Runnable, RunnableConfig
+import os
 
 from open_deep_research.minimax_chat import ChatMiniMax
 
@@ -13,7 +14,9 @@ from open_deep_research.minimax_chat import ChatMiniMax
 def _resolve_chat_model(config):
     """Pick the right chat model based on config['model']."""
     cfg = (config or {}).get("configurable", {}) or {}
-    model_name = cfg.get("model", "")
+    model_name = cfg.get("model", "") or os.environ.get(
+        "OPEN_DEEP_RESEARCH_DEFAULT_MODEL", "minimax:MiniMax-Text-01",
+    )
     max_tokens = cfg.get("max_tokens")
     api_key = cfg.get("api_key")
     if model_name.startswith("minimax:"):
@@ -25,9 +28,7 @@ def _resolve_chat_model(config):
         return ChatMiniMax(**kwargs)
     # Fallback: build a ChatModel that uses the standard init_chat_model path.
     from langchain.chat_models import init_chat_model
-    kwargs = {}
-    if model_name:
-        kwargs["model"] = model_name
+    kwargs = {"model": model_name}
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
     if api_key:

@@ -26,9 +26,12 @@ from open_deep_research.evidence.claim_v3 import ClaimV3
 from open_deep_research.evidence.reconciliation import ReconciliationRecord
 from open_deep_research.evidence.report_result import (
     Confidence,
+    CrossCut,  # W9-L2
+    ExecSummary,  # W10
     FilledSlot,
     ReportResult,
     SectionResult,
+    SectionSummary,  # W9-L1
     derive_confidence,
 )
 
@@ -207,15 +210,109 @@ def _tier_rank(tier: Optional[str]) -> int:
 
 
 # =============================================================================
-# 公开 API
+# §6 · 任务书:综合层溯源校验 + structural_judgment 标注校验
 # =============================================================================
+
+
+def _build_unsourced_synthesis_audit(
+    section_summaries: list[SectionSummary],
+    crosscuts: list[CrossCut],
+    exec_summary: Optional[ExecSummary],
+) -> list[dict]:
+    """§6 · 任务书:综合层每句须有 source_*_ids 支撑,否则进未溯源清单。
+
+    非交涉 1(任务书 §0.1):
+      "综合层每一句要么溯源到 claim/slot,要么显式标注为'结构性判断'。
+       无引用注水 = 毁掉整条流水线的护城河。"
+
+    实现策略(粗粒度启发式,非全 NLP):
+      - 句切分(中英文句号 / 问号)
+      - 每句至少有:一个 [slot_id] / [source_...] 引用 → OK
+                    一个 "结构性判断"/"structural_judgment" 标 → OK
+                    否则 → 进未溯源清单
+    """
+    audit: list[dict] = []
+
+    def _audit_sentences(scope: str, md: str, sources: list[str]) -> None:
+        import re
+        sents = re.split(r"[。！？!?\.]+", md)
+        for s in sents:
+            s = s.strip()
+            if not s or len(s) < 4:
+                continue
+            # 显式溯源:[xxx] 形式 → OK
+            has_inline_ref = bool(re.search(r"\[[a-z_0-9\-]+\]", s, re.IGNORECASE))
+            # 显式标结构性判断
+            has_structural = (
+                "结构性判断" in s or
+                "[structural_judgment]" in s.lower() or
+                "structural_judgment" in s.lower()
+            )
+            # 显式列 source_section_ids → OK(整篇套用)
+            if not has_inline_ref and not has_structural and not sources:
+                audit.append({
+                    "scope": scope,
+                    "sentence": s[:200],
+                    "issue": "no source / no structural_judgment marker",
+                })
+
+    for sm in section_summaries:
+        _audit_sentences(
+            f"section_summary:{sm.section_id}",
+            sm.summary_md,
+            sm.source_slot_ids,
+        )
+    for cc in crosscuts:
+        # crosscut 已有 is_structural_judgment 字段 → 跳过检测
+        if cc.is_structural_judgment:
+            continue
+        _audit_sentences(
+            f"crosscut:{cc.crosscut_id}",
+            cc.md,
+            cc.source_section_ids,
+        )
+    if exec_summary is not None:
+        for kp in exec_summary.key_points:
+            _audit_sentences(
+                f"exec_summary:key_point",
+                kp,
+                exec_summary.source_section_ids,
+            )
+    return audit
+
+
+def _collect_structural_judgments(
+    crosscuts: list[CrossCut],
+) -> list[dict]:
+    """§6 · 任务书:渲染端校验 — is_structural_judgment=True 必在正文显式标'结构性判断'。"""
+    items: list[dict] = []
+    for cc in crosscuts:
+        if not cc.is_structural_judgment:
+            continue
+        if "结构性判断" not in cc.md and "structural_judgment" not in cc.md.lower():
+            items.append({
+                "crosscut_id": cc.crosscut_id,
+                "issue": (
+                    "is_structural_judgment=True but md lacks '结构性判断' marker — "
+                    "render guard requires explicit marking"
+                ),
+            })
+    return items
+
 
 def run_honest_pass(
     report: ReportResult,
     claims: list[ClaimV3],
     reconciliations: list[ReconciliationRecord],
+    *,
+    section_summaries: Optional[list[SectionSummary]] = None,
+    crosscuts: Optional[list[CrossCut]] = None,
+    exec_summary: Optional[ExecSummary] = None,
 ) -> ReportResult:
-    """终检 pass(plan E1)。返回新的 ReportResult,honest_pass 字段填好。"""
+    """终检 pass(plan E1 + 任务书 §6 扩展)。返回新的 ReportResult,honest_pass 字段填好。
+
+    任务书 §6 扩展:接 L1/L2/L3 综合层字段,做溯源审计 + structural_judgment 标注审计。
+    """
     # 1. 主结论门
     report = _downgrade_unverified_main_claims(report)
 
@@ -228,16 +325,31 @@ def run_honest_pass(
     # 4. 来源页
     source_pages = _build_source_pages(report)
 
-    # 构造 honest_pass dict(plan E1:从元数据渲染,不手写)
+    # 5. §6 · 综合层溯源审计(L1 / L2 / L3)
+    section_summaries = section_summaries if section_summaries is not None else report.section_summaries
+    crosscuts = crosscuts if crosscuts is not None else report.crosscuts
+    exec_summary = exec_summary if exec_summary is not None else report.exec_summary
+
+    unsourced = _build_unsourced_synthesis_audit(
+        section_summaries, crosscuts, exec_summary,
+    )
+    structural_items = _collect_structural_judgments(crosscuts)
+
+    # 构造 honest_pass dict(plan E1 + §6)
     honest_pass = {
         "unverified_appendix": unverified,
         "caliber_warnings": caliber_warnings,
         "source_pages": source_pages,
+        # §6 任务书扩展字段
+        "unsourced_synthesis": unsourced,
+        "structural_judgments": structural_items,
         "stats": {
             "unverified_count": len(unverified),
             "caliber_mismatch_count": len(caliber_warnings),
             "section_count": len(report.sections),
             "unique_source_domains": len(source_pages["by_source"]),
+            "unsourced_synthesis_count": len(unsourced),
+            "structural_judgment_count": len(structural_items),
         },
     }
     report.honest_pass = honest_pass
@@ -254,4 +366,6 @@ __all__ = [
     "_build_unverified_appendix",
     "_build_caliber_mismatch_warnings",
     "_build_source_pages",
+    "_build_unsourced_synthesis_audit",  # §6
+    "_collect_structural_judgments",  # §6
 ]

@@ -9,10 +9,25 @@
 vertical_id: us_livecommerce
 title: 美国直播电商市场研究骨架
 
+# 任务书 §7:Framework 顶层 crosscuts 声明(可选;W9-L2 用)
+crosscuts:
+  - id: us_vs_cn
+    kind: comparison_table
+    over_sections: [market_overview, player_landscape]
+    caliber_aware: true
+    notes: 美中口径对比;跨口径值标"不可比"
+  - id: three_poles
+    kind: analysis
+    over_sections: [market_overview, player_landscape, creator_ecosystem]
+    notes: 为何形成三极并存(美中东南亚)而非赢家通吃?分析定论
+
 sections:
   # ---- 1. 市场总览 ----
   - section_id: market_overview
     title: 市场总览
+    # 任务书 §7:本节要 L1 小结
+    synthesis:
+      summary: true
     slots:
       - slot_id: market_size_2025
         question: 2025 年美国直播电商市场规模(美元)?

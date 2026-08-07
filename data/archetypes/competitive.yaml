@@ -8,6 +8,18 @@ description: |
   {market} 区域 {category} 市场的玩家清单 + 各自位置 + 关键事件。
   关键:用 expansion 动态展开实体空间(不手列竞品),cap 做背压。
 
+# 任务书 §7:archetype 顶层 crosscuts(经 build_plan 平移到 Framework.crosscuts)
+crosscuts:
+  - id: vendor_tier_compare
+    kind: comparison_table
+    over_sections: [player_overview, top_entity_dossier]
+    caliber_aware: true
+    notes: 头部厂商 tier / 营收 / 客户数对照(口径不可比项必标)
+  - id: structural_analysis
+    kind: analysis
+    over_sections: [player_overview, top_entity_dossier, market_structure]
+    notes: 行业格局结构性判断(三极 / 双寡头 / 分散)
+
 sections:
   - id: player_overview
     title: 玩家清单
@@ -20,10 +32,36 @@ sections:
         question: "{item[name]} 在 {market} 的{year}年营收 / 市场份额 / 主要产品线"
         expected_claim_type: quantitative
         required_tier_min: A
-        caliber_ref: "{ontology}.revenue"
+        caliber_ref: "{ontology}.financial"
         notes: |
           expansion 把 ontology.vendors 的每个 item 展开为独立 slot。
           cap=30 防止实体爆炸。{item[name]}/{item_id} 在 instance_ctx 暴露。
+
+  # W11 · dossier 深度展开 — 头部 top_n 实体展成多 facet 子槽(各约 2 页深剖)
+  - id: top_entity_dossier
+    title: 头部厂商深度档案 (W11 dossier)
+    depth_expansion:
+      source: "{ontology}.vendors"
+      top_n: 3
+      rank_by: ontology_importance
+      facet_slots:
+        - id: "{item_id}__overview"
+          question: "{item[name]} 公司简介 / 主营产品 / 市场定位"
+          expected_claim_type: qualitative
+        - id: "{item_id}__business_model"
+          question: "{item[name]} 商业模式 / 营收结构 / 客户群分布"
+          expected_claim_type: qualitative
+        - id: "{item_id}__key_data"
+          question: "{item[name]} 关键运营数据(营收 / 客户数 / 装机量)"
+          expected_claim_type: quantitative
+          required_tier_min: B
+          caliber_ref: "{ontology}.financial"
+        - id: "{item_id}__pros_cons"
+          question: "{item[name]} 核心优势与短板"
+          expected_claim_type: qualitative
+        - id: "{item_id}__recent_actions"
+          question: "{item[name]} 近 {year_minus_2} 年关键事件(融资 / 发布 / 并购)"
+          expected_claim_type: event
 
   - id: market_structure
     title: 市场结构

@@ -97,6 +97,8 @@ class Section(BaseModel):
     section_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_]+$")
     title: str = Field(min_length=1, max_length=200)
     slots: list[Slot] = Field(default_factory=list)
+    # 任务书 §7:本节是否要 L1 综合(synthesis.summary=true → L1 必生成)
+    synthesis: Optional[dict] = None
 
     @model_validator(mode="after")
     def _no_duplicate_slot_id_within_section(self) -> "Section":
@@ -116,6 +118,8 @@ class Framework(BaseModel):
     vertical_id: str = Field(min_length=1, max_length=64)
     title: str = Field(min_length=1, max_length=200)
     sections: list[Section] = Field(default_factory=list)
+    # 任务书 §7:Framework 顶层 crosscuts 声明,合成阶段读它产 L2 CrossCut
+    crosscuts: list[dict] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _slot_ids_globally_unique(self) -> "Framework":

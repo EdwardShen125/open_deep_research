@@ -91,6 +91,17 @@ class ClaimV3(BaseModel):
     unit: Optional[str] = Field(default=None, max_length=32)
     value_as_of: Optional[datetime] = None
 
+    # R9 新增:metric_type(market_size/share/regulation 等标准化键)与 entity 主语
+    # 给 reconciliation.cluster_key 用(替代之前用 claim_type / source_domain 的弱代理)。
+    metric_type: Optional[str] = Field(
+        default=None, max_length=32,
+        description="标准化 metric key: market_size/share/regulation/...",
+    )
+    entity: Optional[str] = Field(
+        default=None, max_length=128,
+        description="EU.entities[0] 的主语(对账 entity 维度)",
+    )
+
     # ---- D2 预留(plan D2 严格限 3 条;本字段默认 None 不参与判定) ----
     _attribution_chain: Optional[list[str]] = None
 
@@ -182,6 +193,9 @@ class ClaimV3(BaseModel):
             norm_value=norm_value,
             unit=eu.unit,
             value_as_of=datetime.combine(eu.value_as_of, datetime.min.time()) if eu.value_as_of else None,
+            # R9:从 V2 EU 透传 metric_type / entity 主语
+            metric_type=eu.metric_type,
+            entity=(eu.entities[0] if eu.entities else None),
         )
 
     # -----------------------------------------------------------------

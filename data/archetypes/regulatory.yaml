@@ -42,7 +42,7 @@ sections:
         question: "{market} {category} 厂商违规处罚金额上限"
         expected_claim_type: quantitative
         required_tier_min: A
-        caliber_ref: "{ontology}.fine_amount"
+        caliber_ref: "{ontology}.financial"
       - id: enforcement_history
         question: "{market} {category} 近 {year_minus_2} 年典型执法案例"
         expected_claim_type: event

@@ -23,7 +23,7 @@ sections:
         question: "{market} {category} {year} 年同比增长率"
         expected_claim_type: quantitative
         required_tier_min: B
-        caliber_ref: "{ontology}.growth_rate"
+        caliber_ref: "{ontology}.trends"
 
   - id: sam
     title: 可服务市场 (SAM)
@@ -57,7 +57,7 @@ sections:
         question: "{year}-{year_plus_5} 年 {market} {category} 复合增长率 CAGR"
         expected_claim_type: quantitative
         required_tier_min: B
-        caliber_ref: "{ontology}.growth_rate"
+        caliber_ref: "{ontology}.trends"
         # 当 instance 提供 year 时,自动用 year+5
       - id: growth_drivers
         question: "{market} {category} 增长的核心驱动因素"
