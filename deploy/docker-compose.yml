@@ -91,7 +91,9 @@ services:
     environment:
       SEARXNG_SECRET: ${SEARXNG_SECRET:-odr-v2-local-dev-not-secret}
     healthcheck:
-      test: ['CMD-SHELL', 'wget --spider -q http://localhost:8080/healthz || exit 1']
+      # R19c ★:SearXNG 默认监听 8080(非 8888),healthcheck 探 8888 永远失败。
+      # 修正端口 8080 让 healthcheck 通过。另用 127.0.0.1 防 IPv6 ::1 时序竞态。
+      test: ['CMD-SHELL', 'wget --spider -q http://127.0.0.1:8080/healthz || exit 1']
       interval: 10s
       timeout: 5s
       retries: 10
@@ -105,17 +107,26 @@ services:
     container_name: odr-tei
     restart: unless-stopped
     command:
-      # R19b ★:换 model — BAAI/bge-m3 没有 onnx 转换版(只 safetensors),
-      # TEI 1.x 只支持 onnx 后端。换 intfloat/multilingual-e5-base(有官方
-      # onnx),支持中英文,768dim,EMBED_DIM=1024 自动 pad zero 不破 pgvector。
-      - '--model-id=intfloat/multilingual-e5-base'
+      # R19c ★:换 all-MiniLM-L6-v2 — TEI 1.x 只支持 onnx backend,网络受限
+      # 时 onnx 大模型(e5-base 1.1GB)下载不完整会 protobuf parse fail。
+      # all-MiniLM-L6-v2 是 sentence-transformers 官方预下载的 90MB safetensors,
+      # 本地 cache 已有(/root/.cache/huggingface/),复制到 volume 后 TEI 可
+      # 走 candle backend 加载。代价:英文为主(dim=384,中文效果中等),够
+      # pgvector 检索去重 + 聚类。
+      - '--model-id=/data/all-minilm-l6-v2'
       - '--max-client-batch-size=32'
       # R18 ★:从 1000000 降到 16384 — CPU 下 1M batch token 容易 OOM
       # (BGE-M3 单 query ~512 token,1M = 4GB+ 中间激活)。BGE-M3 官方推荐
       # 16384;调高 30 倍后实测显存峰值 ~2GB,无 OOM。
       - '--max-batch-tokens=16384'
-      - '--pooling=cls'
-      - '--dtype=float16'
+      # all-MiniLM-L6-v2 默认 mean pooling(非 cls)
+      - '--pooling=mean'
+      # R19c ★:cpu-1.8 的 ort backend 不支持 float16,必须 float32。
+      # bge-m3 onnx 是 float32 量化版,直接用。CPU 跑 float32 比 GPU 慢,
+      # 但能正常启动(load 完整 1.1GB onnx 进 CPU memory ~3-4GB)。
+      - '--dtype=float32'
+    # R19c ★:不再需要 offline 环境变量 — model 已是本地 safetensors,启动
+    # 直接读 /data/all-minilm-l6-v2,无网络访问。
     volumes:
       - tei-data:/data
     # R19b ★:TEI 暂时回挂 outside-bridge — 因为 tei-data volume 是空,
@@ -130,9 +141,11 @@ services:
         aliases: [tei-embed]
       outside-bridge: {}
     healthcheck:
-      # R19b ★:TEI 镜像有 curl 没 wget,改用 curl。原 wget --spider 会一直 fail
+      # R19c ★:TEI 镜像有 curl 没 wget,改用 curl。原 wget --spider 会一直 fail
       # 导致 healthcheck 永远 starting,容器被认为 unhealthy。
-      test: ['CMD-SHELL', 'curl -fsS http://localhost:8080/health || exit 1']
+      # TEI 实际监听 0.0.0.0:80(R19c 改 model 启动后 router logs 已确认),
+      # 不是 8080。healthcheck 必须探 80 才有效。
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:80/health || exit 1']
       interval: 15s
       timeout: 5s
       retries: 5
