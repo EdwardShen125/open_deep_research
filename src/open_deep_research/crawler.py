@@ -262,11 +262,24 @@ class Crawl4AIHttpProvider:
     fetch to a dedicated sidecar via HTTP. The sidecar owns a single browser
     pool and serves concurrent crawls.
 
-    API shape (crawl4ai >= 0.4):
-        POST /crawl  body={"urls": [...]}  →  {results: [{url, markdown, success}]}
+    API shape (crawl4ai 0.9.x):
+        POST /crawl
+        Authorization: Bearer <CRAWL4AI_API_TOKEN>
+        Content-Type: application/json
+        Body: {"urls": ["https://..."]}
+        →  {"results": [{"url":..., "markdown":..., "success":bool}]}
+        (or per-url error message wrapped in result.error)
+
+    Auth model:
+        When `CRAWL4AI_API_TOKEN` is set, the sidecar binds `0.0.0.0:11235`
+        AND requires `Authorization: Bearer <token>` on every request.
+        Without the token, the sidecar binds 127.0.0.1 only and refuses all
+        requests with 401 — so this provider is the ONLY way to reach it from
+        another container.
 
     Env config:
-        CRAWLER_URL  (default http://127.0.0.1:11235)
+        CRAWLER_URL          (default http://127.0.0.1:11235)
+        CRAWL4AI_API_TOKEN   (default "" — Bearer header skipped if empty)
 
     Resilience:
         - Per-request timeout (default 30s)
@@ -286,16 +299,21 @@ class Crawl4AIHttpProvider:
         base_url: Optional[str] = None,
         *,
         timeout: float = 30.0,
+        api_token: Optional[str] = None,
         fetcher: Any = None,
     ) -> None:
         self._base_url = (base_url or os.environ.get("CRAWLER_URL") or self.DEFAULT_BASE_URL).rstrip("/")
         self._timeout = timeout
-        self._fetcher = fetcher  # async fn(url, payload, timeout) -> dict
+        # R19b ★:bearer token (env CRAWL4AI_API_TOKEN). crawl4ai 0.9.x requires
+        # auth on every endpoint. If env not set, log once and skip the header
+        # — caller will get 401 and gracefully degrade.
+        self._api_token = api_token or os.environ.get("CRAWL4AI_API_TOKEN", "").strip()
+        self._fetcher = fetcher  # async fn(url, payload, timeout, headers) -> dict
 
     async def fetch(self, url: str, *, prompt_hint: Optional[str] = None) -> CrawlResponse:
         """Fetch a single URL via the sidecar.
 
-        Returns a CrawlResponse. On HTTP / network / timeout failure the
+        Returns a CrawlResponse. On HTTP / network / timeout / auth failure the
         `error` field is set and `markdown` is None — caller treats this as
         'no full-text available, fall back to snippet'.
         """
@@ -305,8 +323,11 @@ class Crawl4AIHttpProvider:
         if cls is PageLevel.UNKNOWN:
             return CrawlResponse(url=url, error="unparseable url")
         fetcher = self._fetcher or self._default_fetcher
+        headers = {"content-type": "application/json"}
+        if self._api_token:
+            headers["Authorization"] = f"Bearer {self._api_token}"
         try:
-            blob = await fetcher(self._base_url, {"urls": [url]}, self._timeout)
+            blob = await fetcher(self._base_url, {"urls": [url]}, self._timeout, headers)
         except Exception as e:
             return CrawlResponse(url=url, error=f"http fetch error: {type(e).__name__}: {e}")
         # crawl4ai returns {"results": [{"url":..., "markdown":..., "success":bool}]}
@@ -325,9 +346,19 @@ class Crawl4AIHttpProvider:
         if not match.get("success", True):
             err = match.get("error") or match.get("error_message") or "sidecar reported failure"
             return CrawlResponse(url=url, error=f"sidecar: {err}")
-        md = match.get("markdown") or match.get("cleaned_html") or ""
+        # R19b ★:crawl4ai 0.9.x returns `html` not `markdown`. Many real
+        # endpoints (baidu, gov.cn) return plain HTML — pipeline downstream
+        # treats markdown/raw_content as opaque text; HTML is fine for the
+        # LLM extractor (it just adds line noise). Keep markdown as the
+        # canonical field name for downstream compatibility.
+        md = (
+            match.get("markdown")
+            or match.get("cleaned_html")
+            or match.get("html")     # crawl4ai 0.9.x default
+            or ""
+        )
         if not md:
-            return CrawlResponse(url=url, error="sidecar returned empty markdown")
+            return CrawlResponse(url=url, error="sidecar returned empty content")
         return CrawlResponse(
             url=url,
             final_url=match.get("url") or url,
@@ -337,14 +368,15 @@ class Crawl4AIHttpProvider:
             promoted_to_page_level=False,
         )
 
-    async def _default_fetcher(self, base_url: str, payload: dict, timeout: float) -> dict:
+    async def _default_fetcher(self, base_url: str, payload: dict, timeout: float, headers: Optional[dict] = None) -> dict:
         """Default fetcher: aiohttp if available, httpx, then urllib fallback."""
         body = json.dumps(payload).encode("utf-8")
+        hdrs = headers or {"content-type": "application/json"}
         # Try httpx (lighter than aiohttp, sync+async both work)
         try:
             import httpx  # type: ignore
             async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.post(base_url + "/crawl", content=body, headers={"content-type": "application/json"})
+                r = await client.post(base_url + "/crawl", content=body, headers=hdrs)
                 r.raise_for_status()
                 return r.json()
         except ImportError:
@@ -358,7 +390,7 @@ class Crawl4AIHttpProvider:
             req = urllib.request.Request(
                 base_url + "/crawl",
                 data=body,
-                headers={"content-type": "application/json"},
+                headers=hdrs,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:

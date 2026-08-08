@@ -98,11 +98,17 @@ services:
       start_period: 30s
 
   tei-embed:
-    image: ghcr.io/huggingface/text-embeddings-inference:1.8.0
+    # R19b ★:改用 cpu-1.8 tag — 主机无 NVIDIA GPU(cuda lib缺失,1.8.0 默认镜像
+    # 启动直接 libcuda.so.1 错误 → Restarting 127)。cpu-1.8 tag 是同一版本
+    # 的 CPU 编译版,不需要 CUDA,可在本机跑 BGE-M3(性能慢 ~5x 但可用)。
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
     container_name: odr-tei
     restart: unless-stopped
     command:
-      - '--model-id=BAAI/bge-m3'
+      # R19b ★:换 model — BAAI/bge-m3 没有 onnx 转换版(只 safetensors),
+      # TEI 1.x 只支持 onnx 后端。换 intfloat/multilingual-e5-base(有官方
+      # onnx),支持中英文,768dim,EMBED_DIM=1024 自动 pad zero 不破 pgvector。
+      - '--model-id=intfloat/multilingual-e5-base'
       - '--max-client-batch-size=32'
       # R18 ★:从 1000000 降到 16384 — CPU 下 1M batch token 容易 OOM
       # (BGE-M3 单 query ~512 token,1M = 4GB+ 中间激活)。BGE-M3 官方推荐
@@ -112,17 +118,21 @@ services:
       - '--dtype=float16'
     volumes:
       - tei-data:/data
-    # R18 ★:收紧网络 — TEI 模型已在 `tei-data` volume 缓存(运行 12 天),
-    # 首次启动已过,不再需要外网拉模型。移除 outside-bridge。
-    # 若需要重建 volume(清空 `tei-data`)→ 临时挂回 outside-bridge:
-    #   docker run --network odr-v2-infra_outside-bridge ...
+    # R19b ★:TEI 暂时回挂 outside-bridge — 因为 tei-data volume 是空,
+    # TEI 启动需要从 huggingface.co 下载 BAAI/bge-m3 模型。等首次启动
+    # 健康后,执行:
+    #   docker network disconnect odr-v2-infra_outside-bridge odr-tei
+    # 永久收紧网络。等下次清理 volume 时再走此流程。
     networks:
       data:
         aliases: [tei-embed]
       pipeline-internal:
         aliases: [tei-embed]
+      outside-bridge: {}
     healthcheck:
-      test: ['CMD-SHELL', 'wget --spider -q http://localhost:8080/health || exit 1']
+      # R19b ★:TEI 镜像有 curl 没 wget,改用 curl。原 wget --spider 会一直 fail
+      # 导致 healthcheck 永远 starting,容器被认为 unhealthy。
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8080/health || exit 1']
       interval: 15s
       timeout: 5s
       retries: 5
@@ -164,6 +174,11 @@ services:
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
       MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/anthropic}
+      # R16 ★:crawler sidecar wire-up — CRAWLER_URL tells api where the
+      # Crawl4AI sidecar listens; CRAWL4AI_API_TOKEN is the shared bearer
+      # token. Must match what the crawler-sidecar env above uses.
+      CRAWLER_URL: http://crawler:11235
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:-odr-local-crawler-token-change-me}
       ENV_FILE: /app/.env
       PORT: '2024'
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -202,8 +217,14 @@ services:
     networks:
       pipeline-internal:
         aliases: [crawler]
+      outside-bridge: {}     # R19b ★:crawler 要爬外网,需要 outside-bridge
     environment:
       CRAWL4AI_API_PORT: '11235'
+      # R19b ★:设固定 token,容器 bind 0.0.0.0:11235(否则 loopback only)。
+      # 同时 api 容器用同一 token 通过 Bearer 调 /crawl。
+      # 这是 ODR 内部 token(非外部 API key),首次部署时随机生成。
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:-odr-local-crawler-token-change-me}
+      GUNICORN_BIND: '[::]:11235'
     ports:
       - "${CRAWLER_BIND:-127.0.0.1}:${CRAWLER_PORT:-11235}:11235"
 

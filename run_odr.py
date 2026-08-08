@@ -288,7 +288,11 @@ async def _run(args) -> int:
             return None
         try:
             from open_deep_research.crawler import Crawl4AIHttpProvider
-            return Crawl4AIHttpProvider(base_url=url, timeout=30.0)
+            return Crawl4AIHttpProvider(
+                base_url=url,
+                timeout=30.0,
+                api_token=args.crawler_token,  # R19b:bearer auth
+            )
         except Exception as _ce:
             print(f"[run_odr] WARNING: Crawl4AIHttpProvider init failed: {_ce}", file=sys.stderr)
             return None
@@ -415,6 +419,12 @@ def main():
     p.add_argument("--crawler-url", default=os.environ.get("CRAWLER_URL"),
                    help="Crawl4AI sidecar URL (e.g. http://127.0.0.1:11235). "
                         "When unset, pipeline uses MockCrawlProvider (snippet-only).")
+    # R19b ★:crawl4ai 0.9.x requires bearer auth on every endpoint. Sidecar
+    # refuses all requests with 401 unless the matching token is provided.
+    # Must match `CRAWL4AI_API_TOKEN` env on the crawler-sidecar container.
+    p.add_argument("--crawler-token", default=os.environ.get("CRAWL4AI_API_TOKEN"),
+                   help="Crawl4AI API token (env CRAWL4AI_API_TOKEN). Required "
+                        "for sidecar auth — without it, sidecar returns 401.")
     p.add_argument("--use-real-crawler", dest="use_real_crawler",
                    action="store_true", default=False,
                    help="Force-enable Crawl4AIHttpProvider even when --crawler-url unset "

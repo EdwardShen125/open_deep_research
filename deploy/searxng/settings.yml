@@ -118,6 +118,10 @@ engines:
     shortcut: ddg
     categories: [general]
     disabled: false
+    # R19b ★:用 wt-wt (worldwide) 绕过 us-en CAPTCHA。SearXNG 默认
+    # duckduckgo 引擎在 us-en locale 下被 DDG 反爬触发 CAPTCHA,换
+    # wt-wt (无地域锁定) 命中率更高。
+    duckduckgo_method: POST
     # DDG HTML scrape(无 token);比 bing 中立,有时中文 EDR 召回更好
   - name: startpage
     engine: startpage
@@ -135,7 +139,8 @@ engines:
     engine: qwant
     shortcut: qw
     categories: [general]
-    disabled: false
+    qwant_categ: web        # R19b ★:qwant engine 必须字段 — 漏写导致 SearXNG
+    disabled: false         # init 失败、注册列表里没出现,/config 看不到 qwant
     # 欧盟隐私引擎,基于 Bing results + 自身索引
 
   # ===== 基础常识 / 厂商元数据 =====
