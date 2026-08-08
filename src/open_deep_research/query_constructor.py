@@ -399,13 +399,15 @@ def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str
         return (
             # P0 fix: dropped arxiv/wikidata from primary; bing + chinaso +
             # wikipedia cover vendor / news / market data; brave as fallback.
-            ["bing", "chinaso", "brave", "wikipedia"],
+            # 临时绕过 brave 限流(v24 实测 brave:Suspended too many requests):
+            # 加 openalex + semantic_scholar 兜底学术源,加 wikipedia 中英百科。
+            ["bing", "chinaso", "wikipedia", "openalex", "semantic_scholar"],
             ["general", "news"],
             "general",
         )
     if dimension_id == "adoption":
         return (
-            ["bing", "chinaso", "brave"],
+            ["bing", "chinaso", "wikipedia", "semantic_scholar"],
             ["general", "news"],
             "general",
         )
@@ -485,7 +487,9 @@ def _deterministic_fallback(brief: str, sub_topic: Any) -> ExecutionPlan:
             topic="general",
             language="zh-CN",
             categories=["general", "news"],
-            engines=["bing", "chinaso", "brave"],
+            # 临时绕过 brave 限流(供应商站查询 v24):bing + chinaso + wikipedia
+            # 仍能命中厂商官网 / 新闻源。
+            engines=["bing", "chinaso", "wikipedia", "semantic_scholar"],
             time_range=None,
             max_results=15,
             expected_yield="CN vendor site:-whitelist",

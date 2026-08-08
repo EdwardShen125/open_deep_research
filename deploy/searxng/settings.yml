@@ -5,10 +5,11 @@
 #   - 加 chinaso (news):中国 EDR 厂商唯一本地源(英文引擎搜不到中文)
 #   - 加 openalex:200M 论文索引(EDR 学术 + 厂商技术报告)
 #   - 加 semantic_scholar:AI 驱动学术检索
-#   - 加 pubmed:备用学术
-#   - 修 wikipedia:加 language: all 让中文命中
+#   - 加 duckduckgo / startpage / mojeek / qwant:R17 新增,通用 web 冗余
+#   - 加 wikipedia:language: all 让中文命中
 #   - 加 wikidata:厂商元数据(CEO/员工数/成立时间)
 #   - 保留 arxiv:EDR bypass 论文强
+#   - 关 pubmed:EDR 调研医学无关(R17)
 #   - 删 github:缺 token 永远 access denied
 #   - 删 openstreetmap:跟 EDR 完全无关
 #
@@ -105,9 +106,37 @@ engines:
     engine: pubmed
     shortcut: pub
     categories: [science]
-    disabled: false
+    disabled: true           # R17 ★:EDR/中国调研全无关(医学论文库),已关
     # 备用 — EDR 不直接相关,但生物医学文献搜索强
     # 39M+ 引用
+
+  # ===== 通用 web 备选(R17 新增,提供 brave 限流下的冗余) =====
+  # duckduckgo / startpage / mojeek / qwant — SearXNG 默认引擎列表的零依赖
+  # 添加项,用于 brave IP-banned 时补充通用 web 召回。
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    categories: [general]
+    disabled: false
+    # DDG HTML scrape(无 token);比 bing 中立,有时中文 EDR 召回更好
+  - name: startpage
+    engine: startpage
+    shortcut: sp
+    categories: [general]
+    disabled: false
+    # 通过 Google 结果代理,无 IP ban 风险;EDR 厂商市场报告补充源
+  - name: mojeek
+    engine: mojeek
+    shortcut: moj
+    categories: [general]
+    disabled: false
+    # 独立爬虫索引(不基于 bing/google),对中小网站覆盖更好
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    categories: [general]
+    disabled: false
+    # 欧盟隐私引擎,基于 Bing results + 自身索引
 
   # ===== 基础常识 / 厂商元数据 =====
   - name: wikipedia
@@ -134,6 +163,10 @@ doi_resolvers:
 default_doi_resolver: oadoi.org
 
 formats:
+  # R18 ★:加回 html — 默认 SearXNG UI 走 / 不带 format 时也要能渲染页面
+  # (audit L136 formats 段误判的根因:虽然 formats 是顶层 key 正常工作,
+  # 但忘了加 html → 浏览器访问 / 返 csv 而非页面)。审计里也建议补 json/rss。
+  - html
   - json
   - csv
   - rss

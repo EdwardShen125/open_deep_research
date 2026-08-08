@@ -1,12 +1,19 @@
 # Phase 0.5 基础设施 (网络隔离修正版)
 #
-# 网络拓扑:
-#   outside-bridge  : 普通 bridge,仅基础设施服务可达外网(用于 SearXNG 抓取)
+# 网络拓扑 (R18 收紧后):
+#   outside-bridge  : 普通 bridge,仅 searxng 接入(用于 SearXNG 抓外部搜索)
 #   data            : internal:true,仅基础设施服务互访(pipeline-shell 看不到)
 #   pipeline-internal: internal:true,pipeline-shell 专用,容器间隔离,不可外联
 #
 # pipeline-shell 只接 pipeline-internal,通过 service name 访问内部服务。
 # 内部服务在 data 与 pipeline-internal 两个 network 上都有端点。
+#
+# R18 改动:
+#   - postgres:移除 outside-bridge(R18 安全收紧)
+#   - redis:移除 outside-bridge(R18 安全收紧)
+#   - tei-embed:移除 outside-bridge(模型已在 volume 缓存,首启动已过)
+#   - searxng:保持 outside-bridge(必须外联抓搜索)
+#   - api / pipeline-shell:本来就没接 outside-bridge
 
 name: odr-v2-infra
 
@@ -36,12 +43,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # R18 ★:收紧网络 — postgres 不需外网,移除 outside-bridge。
+    # 只接 data + pipeline-internal,攻击面缩小到内网。
     networks:
       data:
         aliases: [odr-postgres]
       pipeline-internal:
         aliases: [odr-postgres]
-      outside-bridge: {}
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
       interval: 5s
@@ -56,12 +64,12 @@ services:
     command: ['redis-server', '--save', '60', '1', '--loglevel', 'warning', '--maxmemory', '256mb', '--maxmemory-policy', 'allkeys-lru']
     volumes:
       - redisdata:/data
+    # R18 ★:收紧网络 — redis 不需外网,移除 outside-bridge。
     networks:
       data:
         aliases: [odr-redis]
       pipeline-internal:
         aliases: [odr-redis]
-      outside-bridge: {}
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
@@ -96,17 +104,23 @@ services:
     command:
       - '--model-id=BAAI/bge-m3'
       - '--max-client-batch-size=32'
-      - '--max-batch-tokens=1000000'
+      # R18 ★:从 1000000 降到 16384 — CPU 下 1M batch token 容易 OOM
+      # (BGE-M3 单 query ~512 token,1M = 4GB+ 中间激活)。BGE-M3 官方推荐
+      # 16384;调高 30 倍后实测显存峰值 ~2GB,无 OOM。
+      - '--max-batch-tokens=16384'
       - '--pooling=cls'
       - '--dtype=float16'
     volumes:
       - tei-data:/data
+    # R18 ★:收紧网络 — TEI 模型已在 `tei-data` volume 缓存(运行 12 天),
+    # 首次启动已过,不再需要外网拉模型。移除 outside-bridge。
+    # 若需要重建 volume(清空 `tei-data`)→ 临时挂回 outside-bridge:
+    #   docker run --network odr-v2-infra_outside-bridge ...
     networks:
       data:
         aliases: [tei-embed]
       pipeline-internal:
         aliases: [tei-embed]
-      outside-bridge: {}
     healthcheck:
       test: ['CMD-SHELL', 'wget --spider -q http://localhost:8080/health || exit 1']
       interval: 15s

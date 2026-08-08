@@ -320,6 +320,20 @@ async def _run_pipeline_background(
             primary = TavilyProvider(api_key=tavily_key)
     searxng_url = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080")
     fallback = SearXNGProvider(base_url=searxng_url, timeout=30.0)
+    # R16 ★:instantiate Crawl4AIHttpProvider when CRAWLER_URL is set
+    # (i.e. when running with `--profile full` which starts the sidecar).
+    # Without CRAWLER_URL → crawler stays None → pipeline uses MockCrawlProvider
+    # — keeps test / dev paths working unchanged.
+    crawler = None
+    crawler_url = os.environ.get("CRAWLER_URL")
+    if crawler_url:
+        try:
+            from open_deep_research.crawler import Crawl4AIHttpProvider
+            crawler = Crawl4AIHttpProvider(base_url=crawler_url, timeout=30.0)
+            logger.info("[R16] Crawl4AIHttpProvider wired → %s", crawler_url)
+        except Exception as _ce:
+            logger.warning("[R16] failed to instantiate Crawl4AIHttpProvider: %s", _ce)
+            crawler = None
 
     _ckpt("pipeline", "running")
     try:
@@ -328,6 +342,7 @@ async def _run_pipeline_background(
             run_id=run_id,
             primary=primary,
             fallback=fallback,
+            crawler=crawler,
             max_subtopics=max_subtopics,
             # R3: 4-layer pass-through
             vertical=vertical,
@@ -423,6 +438,20 @@ async def _run_pipeline_resume_background(
             primary = TavilyProvider(api_key=tavily_key)
     searxng_url = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080")
     fallback = SearXNGProvider(base_url=searxng_url, timeout=30.0)
+    # R16 ★:instantiate Crawl4AIHttpProvider when CRAWLER_URL is set
+    # (i.e. when running with `--profile full` which starts the sidecar).
+    # Without CRAWLER_URL → crawler stays None → pipeline uses MockCrawlProvider
+    # — keeps test / dev paths working unchanged.
+    crawler = None
+    crawler_url = os.environ.get("CRAWLER_URL")
+    if crawler_url:
+        try:
+            from open_deep_research.crawler import Crawl4AIHttpProvider
+            crawler = Crawl4AIHttpProvider(base_url=crawler_url, timeout=30.0)
+            logger.info("[R16] Crawl4AIHttpProvider wired → %s", crawler_url)
+        except Exception as _ce:
+            logger.warning("[R16] failed to instantiate Crawl4AIHttpProvider: %s", _ce)
+            crawler = None
 
     _ckpt("pipeline", "running")
     try:
@@ -431,6 +460,7 @@ async def _run_pipeline_resume_background(
             run_id=run_id,
             primary=primary,
             fallback=fallback,
+            crawler=crawler,
             max_subtopics=max_subtopics,
             # R3: 4-layer pass-through on resume
             vertical=vertical,

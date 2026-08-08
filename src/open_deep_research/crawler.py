@@ -34,6 +34,8 @@ page-level URLs without callers having to do anything special.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable, Optional, Protocol, runtime_checkable
@@ -245,6 +247,123 @@ def _topic_match(blob: str, hint: str) -> int:
         if w in blob_l:
             count += 1
     return count
+
+
+# =============================================================================
+# HTTP provider (talks to the crawler-sidecar Docker container)
+# =============================================================================
+
+class Crawl4AIHttpProvider:
+    """HTTP-backed crawler — talks to the `crawler-sidecar` Docker container
+    (image `unclecode/crawl4ai:latest`, listening on port 11235).
+
+    This is the **production path** when running ODR inside `api` container:
+    `api` has no chromium and no `crawl4ai` Python dep, so it delegates the
+    fetch to a dedicated sidecar via HTTP. The sidecar owns a single browser
+    pool and serves concurrent crawls.
+
+    API shape (crawl4ai >= 0.4):
+        POST /crawl  body={"urls": [...]}  →  {results: [{url, markdown, success}]}
+
+    Env config:
+        CRAWLER_URL  (default http://127.0.0.1:11235)
+
+    Resilience:
+        - Per-request timeout (default 30s)
+        - On failure returns a CrawlResponse with `error` set — caller decides
+          fallback (the extract step already accepts `summary` / `content` as
+          fallbacks via `fallback_content_keys`).
+        - Failures NEVER raise — the pipeline degrades to snippet-only EU
+          rather than crashing on a single bad URL.
+    """
+
+    name = "crawl4ai_http"
+
+    DEFAULT_BASE_URL = "http://127.0.0.1:11235"
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        *,
+        timeout: float = 30.0,
+        fetcher: Any = None,
+    ) -> None:
+        self._base_url = (base_url or os.environ.get("CRAWLER_URL") or self.DEFAULT_BASE_URL).rstrip("/")
+        self._timeout = timeout
+        self._fetcher = fetcher  # async fn(url, payload, timeout) -> dict
+
+    async def fetch(self, url: str, *, prompt_hint: Optional[str] = None) -> CrawlResponse:
+        """Fetch a single URL via the sidecar.
+
+        Returns a CrawlResponse. On HTTP / network / timeout failure the
+        `error` field is set and `markdown` is None — caller treats this as
+        'no full-text available, fall back to snippet'.
+        """
+        if not url:
+            return CrawlResponse(url=url, error="empty url")
+        cls = classify_page_level(url)
+        if cls is PageLevel.UNKNOWN:
+            return CrawlResponse(url=url, error="unparseable url")
+        fetcher = self._fetcher or self._default_fetcher
+        try:
+            blob = await fetcher(self._base_url, {"urls": [url]}, self._timeout)
+        except Exception as e:
+            return CrawlResponse(url=url, error=f"http fetch error: {type(e).__name__}: {e}")
+        # crawl4ai returns {"results": [{"url":..., "markdown":..., "success":bool}]}
+        results = (blob or {}).get("results") or []
+        # find the result matching our URL (crawl4ai may add a trailing slash etc.)
+        match = None
+        for r in results:
+            if r.get("url") == url or (r.get("url") or "").rstrip("/") == url.rstrip("/"):
+                match = r
+                break
+        if not match and results:
+            # best-effort: take first if only one URL was requested
+            match = results[0]
+        if not match:
+            return CrawlResponse(url=url, error="no result in sidecar response")
+        if not match.get("success", True):
+            err = match.get("error") or match.get("error_message") or "sidecar reported failure"
+            return CrawlResponse(url=url, error=f"sidecar: {err}")
+        md = match.get("markdown") or match.get("cleaned_html") or ""
+        if not md:
+            return CrawlResponse(url=url, error="sidecar returned empty markdown")
+        return CrawlResponse(
+            url=url,
+            final_url=match.get("url") or url,
+            markdown=md,
+            metadata=match.get("metadata") or {},
+            http_status=match.get("status_code") or match.get("http_status"),
+            promoted_to_page_level=False,
+        )
+
+    async def _default_fetcher(self, base_url: str, payload: dict, timeout: float) -> dict:
+        """Default fetcher: aiohttp if available, httpx, then urllib fallback."""
+        body = json.dumps(payload).encode("utf-8")
+        # Try httpx (lighter than aiohttp, sync+async both work)
+        try:
+            import httpx  # type: ignore
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(base_url + "/crawl", content=body, headers={"content-type": "application/json"})
+                r.raise_for_status()
+                return r.json()
+        except ImportError:
+            pass
+        except Exception as e:
+            raise RuntimeError(f"httpx crawler call failed: {type(e).__name__}: {e}")
+        # Fallback: urllib in executor (sync HTTP)
+        import urllib.request
+        loop = asyncio.get_event_loop()
+        def _post():
+            req = urllib.request.Request(
+                base_url + "/crawl",
+                data=body,
+                headers={"content-type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8", errors="ignore"))
+        return await loop.run_in_executor(None, _post)
 
 
 # =============================================================================

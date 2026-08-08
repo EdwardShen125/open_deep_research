@@ -277,12 +277,31 @@ async def _run(args) -> int:
         print(f"[run_odr] WARNING: get_llm() raised: {_e} (R6/R7 degraded path)", file=sys.stderr)
         _llm = None
 
+    # R16 ★:optional crawler wiring. Returns None when --crawler-url is
+    # unset (pipeline then uses MockCrawlProvider, snippet-only behavior).
+    def _build_crawler(args):
+        url = args.crawler_url
+        if not url:
+            if args.use_real_crawler:
+                print("[run_odr] WARNING: --use-real-crawler set but --crawler-url is empty; "
+                      "pipeline will fall back to MockCrawlProvider.", file=sys.stderr)
+            return None
+        try:
+            from open_deep_research.crawler import Crawl4AIHttpProvider
+            return Crawl4AIHttpProvider(base_url=url, timeout=30.0)
+        except Exception as _ce:
+            print(f"[run_odr] WARNING: Crawl4AIHttpProvider init failed: {_ce}", file=sys.stderr)
+            return None
+
     try:
         result = await run_pipeline_resumable(
             query=args.brief,
             run_id=str(uuid.uuid4()),
             primary=provider,
             fallback=provider if args.mode == "live" else None,
+            # R16 ★:wire up Crawl4AIHttpProvider when --crawler-url is set.
+            # Without it, pipeline falls back to MockCrawlProvider → snippet-only.
+            crawler=_build_crawler(args),
             max_subtopics=args.max_subtopics,
             title=f"ODR: {args.brief[:60]}",
             # 4-layer (post-architecture-v2)
@@ -389,6 +408,17 @@ def main():
     p.add_argument("--brief", required=True, help="Research brief / question")
     p.add_argument("--mode", choices=["fixture", "live"], default="fixture")
     p.add_argument("--searxng-url", default="http://172.18.0.2:8080")
+    # R16 ★:optional Crawl4AI sidecar (HTTP). When set, the pipeline fetches
+    # full-text markdown for each search result before extraction — which is
+    # the difference between 'extract from snippet' and 'extract from real
+    # body'. Mirrors the api/server.py behavior.
+    p.add_argument("--crawler-url", default=os.environ.get("CRAWLER_URL"),
+                   help="Crawl4AI sidecar URL (e.g. http://127.0.0.1:11235). "
+                        "When unset, pipeline uses MockCrawlProvider (snippet-only).")
+    p.add_argument("--use-real-crawler", dest="use_real_crawler",
+                   action="store_true", default=False,
+                   help="Force-enable Crawl4AIHttpProvider even when --crawler-url unset "
+                        "(will warn + still degrade to MockCrawlProvider)")
     p.add_argument("--output", "-o", help="Write markdown to file (default: stdout)")
     p.add_argument("--max-subtopics", type=int, default=4)
     p.add_argument("--persist-pg", action="store_true", default=True,

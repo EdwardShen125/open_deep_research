@@ -603,7 +603,52 @@ async def run_pipeline(
                     # R13:可配置预算 — quantitative 槽 40 页,其他槽 10 页
                     # (任务书 R13)。v19 经验:10 页 → 0~2 EU;40 页 → 8~15 EU。
                     _cap_pages = 40 if _is_quantitative else 10
-                    _raws_capped = raws[:_cap_pages]
+                    # R16 ★:fetch full text via CrawlProvider BEFORE cap.
+                    # Without this, extractor sees SearXNG snippets only — most
+                    # market-size / numeric claims live inside the body, not the
+                    # snippet. `crawler is None` → degrade gracefully to
+                    # snippet-only behavior (R16 audit fix: was never wired).
+                    _fetched_full_text = 0
+                    _crawl_failures = 0
+                    if crawler is not None:
+                        try:
+                            _raws_pre_cap = raws[:_cap_pages]
+                            # Concurrent fetch with bounded fan-out (avoids
+                            # 40 parallel httpx calls on the sidecar).
+                            _sem = asyncio.Semaphore(8)
+                            async def _crawl_one(_r: dict) -> dict:
+                                async with _sem:
+                                    _resp = await crawler.fetch(
+                                        _r.get("url") or "",
+                                        prompt_hint=st.question,
+                                    )
+                                if _resp.markdown and not _resp.error:
+                                        _r["raw_content"] = _resp.markdown
+                                        return ("ok", _r)
+                                return ("err", _r)
+                            _crawled = await asyncio.gather(
+                                *(_crawl_one(r) for r in _raws_pre_cap),
+                                return_exceptions=True,
+                            )
+                            for _c in _crawled:
+                                if isinstance(_c, BaseException):
+                                    _crawl_failures += 1
+                                    continue
+                                _status, _ = _c
+                                if _status == "ok":
+                                    _fetched_full_text += 1
+                                else:
+                                    _crawl_failures += 1
+                            _raws_capped = _raws_pre_cap
+                        except Exception as _ce:
+                            logger.warning(
+                                "[W3 R16] crawl step failed slot=%s err=%s; "
+                                "falling back to snippet-only",
+                                st.id, _ce,
+                            )
+                            _raws_capped = raws[:_cap_pages]
+                    else:
+                        _raws_capped = raws[:_cap_pages]
                     _capped_count = max(0, len(raws) - _cap_pages)
                     # R12 ★:relevance gate · 引擎层确定性兜底。
                     # market_size/quantitative 槽不查 arxiv — 学术论文对市场
@@ -672,9 +717,9 @@ async def run_pipeline(
                     # 把 V2 列表暂存到 ctx-style 临时容器,本 sub_topic 结束后并入 out
                     _batch_v2.extend(eus_v2)
                     logger.info(
-                        "[W3 R13] llm_extractor sub_topic=%s ect=%s raw_results=%d cap_pages=%d capped_off=%d v2_eus=%d v1_eus=%d",
+                        "[W3 R13/R16] llm_extractor sub_topic=%s ect=%s raw_results=%d cap_pages=%d capped_off=%d v2_eus=%d v1_eus=%d crawled_full_text=%d crawl_failures=%d",
                         st.id, expected_claim_type, len(raws), _cap_pages, _capped_count,
-                        len(eus_v2), len(eus),
+                        len(eus_v2), len(eus), _fetched_full_text, _crawl_failures,
                     )
                 else:
                     logger.warning(
@@ -1527,6 +1572,7 @@ def default_components(
     cache: Optional[SearchCache] = None,
     use_real_search: bool = True,
     use_real_crawler: bool = False,
+    crawler_url: Optional[str] = None,  # R16: passed into Crawl4AIHttpProvider
 ) -> dict[str, Any]:
     """Return a dict with the default components for the pipeline.
 
@@ -1539,11 +1585,30 @@ def default_components(
         primary = TavilyProvider(api_key=tavily_api_key or os.environ.get("TAVILY_API_KEY"))
         if searxng_url or os.environ.get("SEARXNG_URL"):
             fallback = SearXNGProvider(base_url=searxng_url)
+    # R16 ★:default crawler policy.
+    #  - use_real_crawler=True → Crawl4AIHttpProvider (talks to docker sidecar).
+    #  - else → MockCrawlProvider (snippet-only, for tests/offline runs).
+    #  - If CRAWLER_URL env not set AND use_real_crawler=True → fall back to
+    #    MockCrawlProvider with a clear log so people don't think the wire-up
+    #    is silently missing (it was, pre-R16).
     crawler: Any = MockCrawlProvider()
     if use_real_crawler:
-        # Caller is responsible for installing crawl4ai; we still expose
-        # the protocol but don't construct it eagerly.
-        crawler = None  # type: ignore
+        try:
+            from open_deep_research.crawler import Crawl4AIHttpProvider  # local import — heavy module
+            crawler = Crawl4AIHttpProvider(base_url=crawler_url)
+            if not (os.environ.get("CRAWLER_URL") or crawler_url):
+                logger.warning(
+                    "[R16] use_real_crawler=True but CRAWLER_URL not set — "
+                    "fetched_full_text will be 0. Set CRAWLER_URL=http://crawler:11235 "
+                    "when running with `--profile full` (which starts the sidecar)."
+                )
+        except Exception as _ie:
+            # R19 ★:don't crash pipeline on missing dep — fall back to MockCrawlProvider
+            # so dev/test paths still work without Crawl4AI sidecar running.
+            logger.warning(
+                "[R19] Crawl4AIHttpProvider init failed (%s); falling back to MockCrawlProvider",
+                _ie,
+            )
     return {
         "primary": primary,
         "fallback": fallback,

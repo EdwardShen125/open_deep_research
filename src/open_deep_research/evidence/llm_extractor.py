@@ -223,6 +223,11 @@ async def extract_from_content_with_llm(
         raw = getattr(response, "content", str(response))
         if not isinstance(raw, str):
             raw = str(raw)
+        # R11 DEBUG:每个 LLM 响应打前 100 字符,定位 0 EU 根因
+        logger.info(
+            "llm_extractor: url=%s raw_len=%d first100=%r",
+            source_url, len(raw), raw[:100],
+        )
     except Exception as e:
         logger.warning("llm_extractor: LLM call failed (url=%s): %s", source_url, e)
         return []
