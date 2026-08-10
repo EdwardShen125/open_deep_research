@@ -127,9 +127,9 @@ def test_query_intent_rejects_unknown_category():
 
 def test_query_intent_dedups_engines_preserving_order():
     q = QueryIntent(
-        queries=["x"], engines=["bing", "arxiv", "bing", "arxiv", "chinaso"],
+        queries=["x"], engines=["bing", "arxiv", "bing", "arxiv", "chinaso news"],
     )
-    assert q.engines == ["bing", "arxiv", "chinaso"], f"engine dedup must preserve order, got {q.engines}"
+    assert q.engines == ["bing", "arxiv", "chinaso news"], f"engine dedup must preserve order, got {q.engines}"
 
 
 def test_query_intent_drops_blank_queries():
@@ -512,7 +512,7 @@ def test_to_search_query_preserves_extras():
                 topic="general",
                 language="en",
                 categories=["general", "news"],
-                engines=["bing", "chinaso", "arxiv"],
+                engines=["bing", "chinaso news", "arxiv"],
                 time_range="year",
                 max_results=15,
                 expected_yield="vendor + market",
@@ -534,7 +534,7 @@ def test_to_search_query_preserves_extras():
 
     sq0 = sqs[0]
     assert sq0.queries == ["CrowdStrike EDR"]
-    assert sq0.extras["engines"] == ["bing", "chinaso", "arxiv"]
+    assert sq0.extras["engines"] == ["bing", "chinaso news", "arxiv"]
     assert sq0.extras["language"] == "en"
     # P0 fix (2026-07-28): SearXNG returns 0 results with time_range=year
     # regardless of language/engines — validator strips it here.
@@ -567,7 +567,7 @@ def test_to_search_query_drops_year_time_range():
             queries=["EDR market size 2024"],
             topic="general",
             language="en",
-            engines=["bing", "chinaso", "wikipedia", "brave"],
+            engines=["bing", "chinaso news", "wikipedia", "brave"],
             time_range="year",   # LLM wanted this; validator strips it
         )],
         source="deterministic",
@@ -580,7 +580,7 @@ def test_to_search_query_drops_year_time_range():
         f"time_range='year' must be dropped; got {sq.extras.get('time_range')!r}"
     )
     # Other extras unaffected.
-    assert sq.extras["engines"] == ["bing", "chinaso", "wikipedia", "brave"]
+    assert sq.extras["engines"] == ["bing", "chinaso news", "wikipedia", "brave"]
     assert sq.extras["language"] == "en"
 
 
@@ -594,7 +594,7 @@ def test_to_search_query_preserves_non_year_time_range():
             queries=["EDR regulation Q3 2024"],
             topic="news",
             language="en",
-            engines=["bing", "chinaso"],
+            engines=["bing", "chinaso news"],
             time_range="month",   # 'month' works on SearXNG — don't drop
         )],
         source="deterministic",
@@ -613,8 +613,8 @@ def test_configured_engines_match_settings_yml():
     This is a trip-wire: if you add an engine to settings.yml without updating
     query_constructor, the LLM falls back for that engine. The test enforces
     that the list is non-empty and includes the 9 engines the user confirmed."""
-    expected = {"bing", "brave", "chinaso", "arxiv", "openalex",
-                "semantic_scholar", "pubmed", "wikipedia", "wikidata"}
+    expected = {"bing", "brave", "chinaso news", "arxiv", "openalex",
+                "semantic scholar", "pubmed", "wikipedia", "wikidata"}
     assert expected.issubset(SearXNG_CONFIGURED_ENGINES), (
         f"missing engines: {expected - SearXNG_CONFIGURED_ENGINES}"
     )
@@ -789,7 +789,7 @@ def test_deterministic_fallback_market_size_drops_arxiv():
     assert "arxiv" not in primary_engines, f"arxiv leaked: {primary_engines}"
     assert "openalex" not in primary_engines, f"openalex leaked: {primary_engines}"
     assert "bing" in primary_engines, f"bing must be primary: {primary_engines}"
-    assert "chinaso" in primary_engines, f"chinaso must be primary for CN: {primary_engines}"
+    assert "chinaso news" in primary_engines, f"chinaso news must be primary for CN: {primary_engines}"
 
 
 def test_deterministic_fallback_performance_keeps_arxiv():

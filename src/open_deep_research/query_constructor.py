@@ -87,13 +87,13 @@ VALID_CATEGORIES = frozenset({
 VALID_LANGUAGES = frozenset({"auto", "en", "zh-CN", "all"})
 VALID_TIME_RANGES = frozenset({"day", "week", "month", "year"})
 
-# The engines configured in deploy/searxng/settings.yml (host bind mount).
-# Keep in lock-step with that file; if you add an engine there, add here.
-# U0 ★ (2026-08-10 验证 v34): 加 360search / sogou (中文 site: 召回源);
-# 加 duckduckgo / startpage / mojeek / qwant (通用 web 冗余)。
+# U0 ★ (2026-08-10 验证 v34 + v35): SearXNG 1.x engine names 用空格分隔
+# (e.g. "semantic scholar" 而不是 "semantic_scholar")。客户端传 underscore
+# 版本会被 SearXNG 静默 fallback 到默认 engines,导致 engines= 整个被忽略。
+# Keep in lock-step with deploy/searxng/settings.yml.
 SearXNG_CONFIGURED_ENGINES = frozenset({
-    "bing", "brave", "chinaso",
-    "arxiv", "openalex", "semantic_scholar", "pubmed",
+    "bing", "brave", "chinaso news",
+    "arxiv", "openalex", "semantic scholar", "pubmed",
     "wikipedia", "wikidata",
     "360search", "sogou",
     "duckduckgo", "startpage", "mojeek", "qwant",
@@ -401,34 +401,37 @@ def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str
     """
     if dimension_id == "market_size":
         return (
-            # U0 ★ (2026-08-10 验证 v34):中国 EDR site: 召回必须靠 360search;
+            # U0 ★ (2026-08-10 验证 v34 + v35): SearXNG 1.x engine name 是带空格的
+            # "semantic scholar"(不是 "semantic_scholar")。SearXNG 1.x 收到
+            # 不识别的 engine name 静默 fallback 到默认 engines (arxiv),
+            # 导致 engines= 整个被忽略。中国 EDR site: 召回必须靠 360search;
             # bing 在 zh-CN site:qianxin.com query 翻译成英文"EDR market size"
             # 返 emarketer live commerce。360search (so.com) 对中国厂商域名
             # 完美命中(实测 7/7 qianxin EDR 结果),bing 作为英文学术/全球冗余。
             # P0 fix: dropped arxiv/wikidata from primary; bing + 360search +
             # chinaso + wikipedia cover vendor / news / market data; brave as fallback.
             # 临时绕过 brave 限流(v24 实测 brave:Suspended too many requests):
-            # 加 semantic_scholar 兜底学术源。
-            ["bing", "360search", "chinaso", "wikipedia", "semantic_scholar"],
+            # 加 semantic scholar 兜底学术源。
+            ["bing", "360search", "chinaso news", "wikipedia", "semantic scholar"],
             ["general", "news"],
             "general",
         )
     if dimension_id == "adoption":
         return (
-            ["bing", "360search", "chinaso", "wikipedia", "semantic_scholar"],
+            ["bing", "360search", "chinaso news", "wikipedia", "semantic scholar"],
             ["general", "news"],
             "general",
         )
     if dimension_id == "regulation":
         return (
-            ["bing", "360search", "chinaso"],
+            ["bing", "360search", "chinaso news"],
             ["news"],
             "news",
         )
     if dimension_id == "performance":
         # Pure technical/academic — keep arxiv/openalex here.
         return (
-            ["arxiv", "openalex", "semantic_scholar"],
+            ["arxiv", "openalex", "semantic scholar"],
             ["science", "general"],
             "science",
         )
@@ -441,7 +444,7 @@ def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str
     # Default / context — broader sweep but bias toward news/vendor sources.
     # U0 ★:加 360search — 中国厂商 site: 召回关键源
     return (
-        ["bing", "360search", "chinaso", "wikipedia", "brave"],
+        ["bing", "360search", "chinaso news", "wikipedia", "brave"],
         ["general", "news"],
         "general",
     )
@@ -498,9 +501,11 @@ def _deterministic_fallback(brief: str, sub_topic: Any) -> ExecutionPlan:
             categories=["general", "news"],
             # U0 ★:加 360search — 中国厂商 site: 召回关键源(v34 实测 360search
             # 返 7/7 qianxin EDR 结果,bing 翻译坏了返 emarketer live commerce)。
+            # SearXNG 1.x engine name: "semantic scholar" (空格) — 下划线版本
+            # 被 SearXNG 静默 fallback 到默认 engines,会让整个 engines= 失效。
             # 临时绕过 brave 限流(供应商站查询 v24):bing + chinaso + wikipedia
             # 仍能命中厂商官网 / 新闻源。
-            engines=["bing", "360search", "chinaso", "wikipedia", "semantic_scholar"],
+            engines=["bing", "360search", "chinaso news", "wikipedia", "semantic scholar"],
             time_range=None,
             max_results=15,
             expected_yield="CN vendor site:-whitelist",
