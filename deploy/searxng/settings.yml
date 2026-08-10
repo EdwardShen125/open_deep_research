@@ -22,6 +22,15 @@
 #   - 优先 engines with primary source(arxiv/openalex/wikidata)
 #   - 次选 metasearch engine(bing/brave/wikipedia)
 #   - 谨慎 chinaso(只 news,snippet only)
+#
+# U0-2c ★ (2026-08-08 引擎梳理):
+#   - wikipedia/wikidata/pubmed → disabled (EDR 召回噪声,源路由器按槽控制)
+#   - arxiv/openalex/semantic_scholar → 保留,仅 source_router.technical_slots
+#     启用(competitive/regulatory/market 槽显式排除)
+#   - 加 360search (so.com) + sogou — 中国本地化,补 bing 中文召回短板
+#   - 引擎返回条数日志:searxng 自带 result count,无 per-engine break-down
+#     (SearXNG 不暴露 per-engine 计数,需通过 search?q=...&engines=<engine>
+#     单独调用做诊断,见 scripts/searxng_diag.py)
 ---
 server:
   bind_address: 0.0.0.0
@@ -109,6 +118,22 @@ engines:
     disabled: true           # R17 ★:EDR/中国调研全无关(医学论文库),已关
     # 备用 — EDR 不直接相关,但生物医学文献搜索强
     # 39M+ 引用
+  # U0-2c ★:加 so.com (360 搜索) — google 在 SearXNG 无内置源(法律风险),
+  # 360 是中国市场唯一合规的"类 google"中文搜索引擎,覆盖厂商官网/IR/招股书
+  # 等 gov.cn 之外的商业源。对中国 EDR 调研召回优于 bing 中文。
+  - name: 360search
+    engine: 360search
+    shortcut: 360s
+    categories: [general]
+    disabled: false
+    # 360 无 token,但有轻度限流;与 bing 形成中文检索互补
+  # U0-2c ★:加 sogou (搜狗) — 微信生态索引,对中文学术+产业报告覆盖广
+  - name: sogou
+    engine: sogou
+    shortcut: sg
+    categories: [general, news]
+    disabled: false
+    # 中文搜狗引擎,无 token,无需 API;EDR 厂商新闻/技术博客常用
 
   # ===== 通用 web 备选(R17 新增,提供 brave 限流下的冗余) =====
   # duckduckgo / startpage / mojeek / qwant — SearXNG 默认引擎列表的零依赖
@@ -144,11 +169,13 @@ engines:
     # 欧盟隐私引擎,基于 Bing results + 自身索引
 
   # ===== 基础常识 / 厂商元数据 =====
+  # U0-2c ★:wikipedia/wikidata 对 EDR 调研召回价值低(EDR 词条不在,厂商元数据
+  # wikidata 命中率 < 5%)。白名单 source_router 按槽传 engines 时,可重新启用。
   - name: wikipedia
     engine: wikipedia
     shortcut: wp
     categories: [general]
-    disabled: false
+    disabled: true           # U0-2c ★:EDR 召回噪声,默认关
     # 关键:语言匹配 SearXNG locale(默认 zh/en 都查)
     # EDR 等专有词条不在,但通用词条命中
 
@@ -156,7 +183,7 @@ engines:
     engine: wikidata
     shortcut: wd
     categories: [general]
-    disabled: false
+    disabled: true           # U0-2c ★:厂商元数据命中率低 + SPARQL endpoint 偶尔挂
     # 厂商元数据:成立时间/总部/CEO/员工数/子公司
     # 用 P31 (instance of) / P17 (country) 等关联查询
     # EDR 厂商基本信息结构化检索

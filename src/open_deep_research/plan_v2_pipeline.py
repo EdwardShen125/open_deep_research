@@ -639,6 +639,29 @@ async def run_pipeline(
                                     _fetched_full_text += 1
                                 else:
                                     _crawl_failures += 1
+                            # U0-2b ★:raw_content 命中率 — 抽取质量的核心可观测
+                            # 指标。raw_content 命中失败时 extract 退到 snippet,
+                            # 抽取质量坍塌,所以必须每 sub_topic 都打。
+                            _crawl_total = _fetched_full_text + _crawl_failures
+                            _crawl_hit_rate = (
+                                _fetched_full_text / _crawl_total
+                                if _crawl_total else 0.0
+                            )
+                            logger.info(
+                                "[W3 R16 hit-rate] sub_topic=%s fetched=%d "
+                                "failures=%d total=%d hit_rate=%.2f",
+                                st.id, _fetched_full_text, _crawl_failures,
+                                _crawl_total, _crawl_hit_rate,
+                            )
+                            # U0-2b ★:低命中率告警 — < 30% 表示 crawl 链路出问题
+                            # (侧车挂 / SSRF 拦 / 网络劫持)。让上游能第一时间发现。
+                            if _crawl_total and _crawl_hit_rate < 0.30:
+                                logger.warning(
+                                    "[W3 R16 LOW hit-rate alert] sub_topic=%s "
+                                    "hit_rate=%.2f fetched=%d/%d — 检查侧车/SSRF/网络",
+                                    st.id, _crawl_hit_rate,
+                                    _fetched_full_text, _crawl_total,
+                                )
                             _raws_capped = _raws_pre_cap
                         except Exception as _ce:
                             logger.warning(
