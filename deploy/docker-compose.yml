@@ -34,7 +34,13 @@ volumes:
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # U0 ★:用 pgvector/pgvector:pg16 替代 postgres:16-alpine。R18 整改时用了
+    # 官方 alpine image,但其不包含 pgvector 的 vector.so 共享库 → R19c 之后
+    # 每次 EuDAO.upsert_many / gates_runner PG 操作都报
+    # "could not access file $libdir/vector: No such file or directory" + fallback
+    # to in-memory,导致 EU/claim 没真正持久化。pgvector/pgvector:pg16 是
+    # 官方预装 pgvector 的镜像,vector extension 可直接 CREATE EXTENSION。
+    image: pgvector/pgvector:pg16
     container_name: odr-postgres
     restart: unless-stopped
     environment:
