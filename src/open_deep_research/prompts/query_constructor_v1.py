@@ -15,7 +15,7 @@ Output: a JSON object matching the `ExecutionPlan` schema:
           "topic": "general" | "news" | "science" | ... ,
           "language": "en" | "zh-CN" | "auto",
           "categories": ["general", "news", "science", "it"],
-          "engines":   ["bing", "chinaso", "arxiv", "openalex", "wikidata"],
+          "engines":   ["bing", "360search", "chinaso news", "arxiv", "openalex", "semantic scholar", "wikipedia", "wikidata"],
           "time_range": "year" | "month" | "week" | "day" | null,
           "max_results": 10,
           "expected_yield": "vendor + market"   // why this profile
@@ -53,11 +53,15 @@ SearXNG is a meta-search engine that aggregates multiple backends. Its per-reque
   - `topic`           : general | news | science | it | images | video | files | social media | ...
   - `language`        : auto | en | zh-CN | all
   - `categories`      : general | news | science | it | images | videos | ... (we'll send comma-separated)
-  - `engines`         : bing | brave | chinaso | arxiv | openalex | semantic_scholar | pubmed | wikipedia | wikidata | ... (configured in our SearXNG container)
+  - `engines`         : bing | brave | 360search | sogou | chinaso news | arxiv | openalex | semantic scholar | pubmed | wikipedia | wikidata | duckduckgo | startpage | mojeek | qwant (configured in our SearXNG container — see SearXNG_CONFIGURED_ENGINES in code)
   - `time_range`      : day | week | month | year | null (omit when freshness is not a concern)
   - `max_results`     : 5..50
 
-We have only one backend: SearXNG (SearXNGProvider). The SearXNG container has 9 engines configured: bing, brave, chinaso (news only), arxiv, openalex, semantic_scholar, pubmed, wikipedia, wikidata. Anything outside this set is invalid.
+We have only one backend: SearXNG (SearXNGProvider). The SearXNG container has 15 engines configured (full set in SearXNG_CONFIGURED_ENGINES): bing, brave, 360search, sogou, chinaso news (news only), arxiv, openalex, semantic scholar, pubmed, wikipedia, wikidata, duckduckgo, startpage, mojeek, qwant. Anything outside this set is invalid.
+
+⚠️ SearXNG 1.x engine names use SPACES (e.g. "semantic scholar", "chinaso news"). Underscore variants ("semantic_scholar", "chinaso") are silently dropped — SearXNG falls back to default engines and returns arxiv-only results.
+
+⚠️ For Chinese EDR / 终端安全 research, MUST include "360search" in `engines` — 360search (so.com) is the only Chinese-localized SearXNG engine with reliable site: recall (7/7 qianxin.com results vs bing returning emarketer live commerce from English translation drift).
 
 ## Inputs you receive
 1. `research_brief` — the user's overall question (may be Chinese or English or mixed).
@@ -88,22 +92,22 @@ A JSON object with shape:
 You MUST emit AT LEAST ONE intent. Emit two when:
   (a) brief contains vendor/product names that need exact recall,
   (b) AND the dimension needs broader market/regulation context
-  → first intent = vendor-specific (engines=bing,chinaso,wikidata; categories=general,news)
-  → second intent = broader sweep (engines=arxiv,openalex,wikipedia; categories=science,general)
+  → first intent = vendor-specific (engines=[bing, 360search, chinaso news, wikipedia, brave]; categories=[general, news]) — 360search is REQUIRED for CN vendor site: recall
+  → second intent = broader sweep (engines=[bing, 360search, wikipedia, semantic scholar]; categories=[general, news])
 
-When the brief contains no vendor/entity AND the dimension is purely descriptive → emit ONE intent with broader engines only.
+When the brief contains no vendor/entity AND the dimension is purely descriptive → emit ONE intent with broader engines (still include 360search for breadth).
 
 ## Hard rules
 - Each `queries[i]` MUST be ≤120 characters, ASCII-safe (no em-dash / colon / parentheses / brackets — replace with space or hyphen).
 - Use the brief's main locale (heuristic: ≥30% Chinese characters → locale=zh-CN, else en).
-- For market_size / adoption: prefer engines=[bing,chinaso,wikipedia,brave] + topic=general + time_range=null. **Do NOT default to arxiv/openalex** — those engines pollute results with EDR-disambiguation noise (Early Data Release astronomy, Energy Demand Reduction, Event Data Recorder). **ALSO do not set time_range=year** — SearXNG returns 0 results with time_range=year regardless of language/engines.
-- For regulation: prefer topic=news, engines=[bing,chinaso], time_range=month (regulatory news ages quickly).
-- For performance: prefer engines=[arxiv,openalex,semantic_scholar], categories=[science,it] (this is the ONLY dimension where arxiv is appropriate).
-- For ethics: prefer engines=[wikipedia,wikidata,pubmed], categories=[general,science], time_range=null.
-- For context (dimension_id is None): broader sweep, topic=general, engines=[bing,chinaso,wikipedia,brave].
+- For market_size / adoption: prefer engines=[bing, 360search, chinaso news, wikipedia, brave] + topic=general + time_range=null. **Do NOT default to arxiv/openalex** — those engines pollute results with EDR-disambiguation noise (Early Data Release astronomy, Energy Demand Reduction, Event Data Recorder). **ALSO do not set time_range=year** — SearXNG returns 0 results with time_range=year regardless of language/engines. **ALWAYS include 360search** for Chinese vendor site: recall.
+- For regulation: prefer topic=news, engines=[bing, 360search, chinaso news], time_range=month (regulatory news ages quickly).
+- For performance: prefer engines=[arxiv, openalex, semantic scholar], categories=[science, it] (this is the ONLY dimension where arxiv is appropriate).
+- For ethics: prefer engines=[wikipedia, wikidata, pubmed], categories=[general, science], time_range=null.
+- For context (dimension_id is None): broader sweep, topic=general, engines=[bing, 360search, chinaso news, wikipedia, brave].
 - When the brief contains Chinese EDR vendor names (奇安信/360/深信服/绿盟/启明星辰/天融信/安恒) OR ≥30% CJK chars, you MUST emit a SECOND intent that uses `site:` operators to constrain to CN vendor domains:
   - `site:qihoo.com OR site:360.cn OR site:sangfor.com OR site:nsfocus.com OR site:dbappsecurity.com.cn OR site:venustech.com.cn OR site:qax.com.cn OR site:qianxin.com OR site:topsec.com.cn OR site:dbcloud.com.cn`
-  - engines for the vendor intent: bing, chinaso, brave (NOT arxiv).
+  - engines for the vendor intent: bing, 360search, chinaso news, brave (NOT arxiv). 360search is THE key engine for CN vendor site: recall.
 - DO NOT include arxiv OR openalex unless the dimension is performance OR the query is purely descriptive academic research.
 
 ## Output contract
@@ -113,5 +117,5 @@ When the brief contains no vendor/entity AND the dimension is purely descriptive
 
 ## Failure mode
 If you cannot decide, return exactly:
-{{"version":1, "rationale":"insufficient context", "intents":[{{"queries":["<verbatim brief>"],"topic":"general","language":"auto","categories":["general"],"engines":["bing","wikipedia","arxiv"],"max_results":10,"expected_yield":"best-effort fallback"}}]}}
+{{"version":1, "rationale":"insufficient context", "intents":[{{"queries":["<verbatim brief>"],"topic":"general","language":"auto","categories":["general"],"engines":["bing","360search","wikipedia","arxiv"],"max_results":10,"expected_yield":"best-effort fallback"}}]}}
 """
