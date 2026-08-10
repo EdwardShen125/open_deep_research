@@ -142,13 +142,19 @@ class SearXNGOrFixtureProvider(SearchProvider):
 
     async def search(self, query: SearchQuery) -> list[SearchResult]:
         if await self._check_searxng():
-            # Real SearXNG path would go here; for now stay deterministic.
+            # Real SearXNG path. U0 ★ (2026-08-10 验证 v38): SearXNGProvider
+            # default timeout=5.0 is too short — SearXNG meta-search needs to
+            # fan out to 15 engines, takes ~10s+ under load. Without explicit
+            # timeout, provider raises ReadTimeout, fixture fallback silently
+            # returns emarketer/mckinsey US live commerce data (pollutes
+            # CN EDR research pipeline).
             try:
                 from open_deep_research.search_providers import SearXNGProvider
-                p = SearXNGProvider(self._searxng_url)
+                p = SearXNGProvider(self._searxng_url, timeout=30.0)
                 return await p.search(query)
             except Exception:
-                pass
+                import traceback
+                traceback.print_exc()
         # Fallback to fixture.
         return await self._fixture.search(query)
 

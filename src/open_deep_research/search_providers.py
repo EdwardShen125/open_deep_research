@@ -369,15 +369,24 @@ class SearXNGProvider:
     DEFAULT_BASE_URL = "http://127.0.0.1:8888"
 
     def __init__(
-        self,
-        base_url: Optional[str] = None,
-        *,
-        fetcher: Any = None,
-        timeout: float = 5.0,
-    ) -> None:
+            self,
+            base_url: Optional[str] = None,
+            *,
+            # U0 ★ (2026-08-10 验证 v38): default timeout 30s. SearXNG 1.x meta-search
+            # fans out to 15 engines, takes ~10s+ under load. Old default 5s caused
+            # silent ReadTimeout → fixture fallback → CN EDR research returned
+            # emarketer/mckinsey US live commerce data.
+            timeout: float = 30.0,
+            api_token: Optional[str] = None,
+            fetcher: Any = None,
+        ) -> None:
         self._base_url = (base_url or os.environ.get("SEARXNG_URL") or self.DEFAULT_BASE_URL).rstrip("/")
-        self._fetcher = fetcher
         self._timeout = timeout
+        # R19b ★:bearer token (env CRAWL4AI_API_TOKEN). SearXNG 0.9.x requires
+        # auth on every endpoint. If env not set, log once and skip the header
+        # — caller will get 401 and gracefully degrade.
+        self._api_token = api_token or os.environ.get("CRAWL4AI_API_TOKEN", "").strip()
+        self._fetcher = fetcher  # async fn(url, params, timeout) -> dict
 
     async def search(self, query: SearchQuery) -> list[SearchResult]:
         fetcher = self._fetcher or self._default_fetcher
