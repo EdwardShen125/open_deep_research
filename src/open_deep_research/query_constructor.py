@@ -87,12 +87,16 @@ VALID_CATEGORIES = frozenset({
 VALID_LANGUAGES = frozenset({"auto", "en", "zh-CN", "all"})
 VALID_TIME_RANGES = frozenset({"day", "week", "month", "year"})
 
-# The 9 engines configured in deploy/searxng/settings.yml (host bind mount).
+# The engines configured in deploy/searxng/settings.yml (host bind mount).
 # Keep in lock-step with that file; if you add an engine there, add here.
+# U0 ★ (2026-08-10 验证 v34): 加 360search / sogou (中文 site: 召回源);
+# 加 duckduckgo / startpage / mojeek / qwant (通用 web 冗余)。
 SearXNG_CONFIGURED_ENGINES = frozenset({
     "bing", "brave", "chinaso",
     "arxiv", "openalex", "semantic_scholar", "pubmed",
     "wikipedia", "wikidata",
+    "360search", "sogou",
+    "duckduckgo", "startpage", "mojeek", "qwant",
 })
 
 
@@ -397,23 +401,27 @@ def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str
     """
     if dimension_id == "market_size":
         return (
-            # P0 fix: dropped arxiv/wikidata from primary; bing + chinaso +
-            # wikipedia cover vendor / news / market data; brave as fallback.
+            # U0 ★ (2026-08-10 验证 v34):中国 EDR site: 召回必须靠 360search;
+            # bing 在 zh-CN site:qianxin.com query 翻译成英文"EDR market size"
+            # 返 emarketer live commerce。360search (so.com) 对中国厂商域名
+            # 完美命中(实测 7/7 qianxin EDR 结果),bing 作为英文学术/全球冗余。
+            # P0 fix: dropped arxiv/wikidata from primary; bing + 360search +
+            # chinaso + wikipedia cover vendor / news / market data; brave as fallback.
             # 临时绕过 brave 限流(v24 实测 brave:Suspended too many requests):
-            # 加 openalex + semantic_scholar 兜底学术源,加 wikipedia 中英百科。
-            ["bing", "chinaso", "wikipedia", "openalex", "semantic_scholar"],
+            # 加 semantic_scholar 兜底学术源。
+            ["bing", "360search", "chinaso", "wikipedia", "semantic_scholar"],
             ["general", "news"],
             "general",
         )
     if dimension_id == "adoption":
         return (
-            ["bing", "chinaso", "wikipedia", "semantic_scholar"],
+            ["bing", "360search", "chinaso", "wikipedia", "semantic_scholar"],
             ["general", "news"],
             "general",
         )
     if dimension_id == "regulation":
         return (
-            ["bing", "chinaso"],
+            ["bing", "360search", "chinaso"],
             ["news"],
             "news",
         )
@@ -431,8 +439,9 @@ def _dimension_to_default_engines(dimension_id: Optional[str]) -> tuple[list[str
             "general",
         )
     # Default / context — broader sweep but bias toward news/vendor sources.
+    # U0 ★:加 360search — 中国厂商 site: 召回关键源
     return (
-        ["bing", "chinaso", "wikipedia", "brave"],
+        ["bing", "360search", "chinaso", "wikipedia", "brave"],
         ["general", "news"],
         "general",
     )
@@ -487,9 +496,11 @@ def _deterministic_fallback(brief: str, sub_topic: Any) -> ExecutionPlan:
             topic="general",
             language="zh-CN",
             categories=["general", "news"],
+            # U0 ★:加 360search — 中国厂商 site: 召回关键源(v34 实测 360search
+            # 返 7/7 qianxin EDR 结果,bing 翻译坏了返 emarketer live commerce)。
             # 临时绕过 brave 限流(供应商站查询 v24):bing + chinaso + wikipedia
             # 仍能命中厂商官网 / 新闻源。
-            engines=["bing", "chinaso", "wikipedia", "semantic_scholar"],
+            engines=["bing", "360search", "chinaso", "wikipedia", "semantic_scholar"],
             time_range=None,
             max_results=15,
             expected_yield="CN vendor site:-whitelist",
@@ -710,7 +721,7 @@ async def construct(
             topic="general",
             language="auto",
             categories=["general"],
-            engines=["bing", "wikipedia", "arxiv"],
+            engines=["bing", "360search", "wikipedia", "arxiv"],
             time_range=None,
             max_results=5,
             expected_yield="legacy-baseline",
