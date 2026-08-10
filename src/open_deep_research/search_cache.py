@@ -41,14 +41,21 @@ from typing import Any, Optional
 # Cache key derivation
 # =============================================================================
 
-def query_key(query: str, topic: str = "general") -> str:
+def query_key(query: str, topic: str = "general", engines: Optional[tuple[str, ...]] = None, language: Optional[str] = None) -> str:
     """Stable cache key for a (query, topic) pair.
 
     We lowercase + collapse whitespace so trivial rephrasings dedup.
+
+    U0 ★ (2026-08-10 验证 v37): cache key 必须包含 engines + language,
+    否则同一 query 不同 engines 配置会返陈旧结果(v34 emarketer live commerce
+    污染 v37 的 qianxin EDR 召回)。SearXNG engines 决定返回什么站点,
+    不同 engines → 不同 results → 不同 cache key 必须分开。
     """
     qn = " ".join((query or "").lower().split())
     tn = (topic or "general").lower()
-    raw = f"q={qn}|t={tn}"
+    eng = ",".join(sorted(e.strip() for e in (engines or ()) if e)) or "*"
+    lang = (language or "auto").lower()
+    raw = f"q={qn}|t={tn}|e={eng}|l={lang}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
@@ -150,9 +157,9 @@ class SearchCache:
         return None  # L2 lookup is implemented via a dedicated method in v1.2.1
 
     # ---------- public ----------
-    def get(self, query: str, topic: str = "general") -> Optional[dict[str, Any]]:
+    def get(self, query: str, topic: str = "general", engines: Optional[tuple[str, ...]] = None, language: Optional[str] = None) -> Optional[dict[str, Any]]:
         """Try L1 → L2. Returns a dict payload or None on miss."""
-        key = query_key(query, topic)
+        key = query_key(query, topic, engines=engines, language=language)
         v = self._l1_get(key)
         if v is not None:
             return v
@@ -173,13 +180,15 @@ class SearchCache:
         topic: str = "general",
         urls: Optional[list] = None,
         ttl_seconds: Optional[int] = None,
+        engines: Optional[tuple[str, ...]] = None,
+        language: Optional[str] = None,
     ) -> None:
         """Persist `payload` in L1 (always) and L2 (when dao is set + urls given).
 
         `urls` is the list of returned URLs (each will be upserted with the
         matching `expires_at` if a DAO is provided).
         """
-        key = query_key(query, topic)
+        key = query_key(query, topic, engines=engines, language=language)
         ttl = ttl_seconds if ttl_seconds is not None else self._ttl
         if ttl != self._ttl:
             # Per-entry TTL override

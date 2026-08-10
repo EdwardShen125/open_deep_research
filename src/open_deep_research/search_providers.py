@@ -630,16 +630,25 @@ class UnifiedSearch:
         # Cache per query; we just probe the first one in a multi-query batch.
         if not query.queries:
             return None
-        return self.cache.get(query.queries[0], topic=query.topic)
+        # U0 ★ (2026-08-10 验证 v37): cache key 包含 engines + language.
+        extras = query.extras or {}
+        engines_tuple = tuple(extras.get("engines") or ())
+        lang = extras.get("language")
+        return self.cache.get(query.queries[0], topic=query.topic, engines=engines_tuple, language=lang)
 
     def _write_cache(self, query: SearchQuery, resp: SearchResponse) -> None:
         if not query.queries:
             return
+        extras = query.extras or {}
+        engines_tuple = tuple(extras.get("engines") or ())
+        lang = extras.get("language")
         self.cache.put(
             query.queries[0],
             {"results": [r.to_dict() for r in resp.results]},
             topic=query.topic,
             urls=[r.to_dict() for r in resp.results],
+            engines=engines_tuple,
+            language=lang,
         )
 
     def _register_sources(self, query: SearchQuery, resp: SearchResponse) -> None:
