@@ -690,14 +690,33 @@ async def run_pipeline(
                                 "[W3 R12] arxiv filtered for quantitative slot=%s: %d pages dropped",
                                 st.id, _arxiv_filtered,
                             )
-                    eus_v2 = await extract_from_search_results_with_llm(
-                        _raws_capped,
-                        run_id=rid,
-                        llm=llm,
-                        sub_query=st.question,
-                        extractor_model="extractor_v1",
-                        expected_claim_type=expected_claim_type,
-                    )
+                    # W3 R0 diagnose: sub_topic budget. Sequential ~10min
+                    # under cap=40 was eating the whole run. Concurrent
+                    # extract (semaphore 4) drops this to ~2-3min, but
+                    # budget the call at 600s and KEEP partial EUs on
+                    # timeout — never silently zero out a sub_topic because
+                    # of a slow LLM upstream.
+                    _SUB_TOPIC_TIMEOUT_S = 600.0
+                    import asyncio as _asyncio
+                    try:
+                        eus_v2 = await _asyncio.wait_for(
+                            extract_from_search_results_with_llm(
+                                _raws_capped,
+                                run_id=rid,
+                                llm=llm,
+                                sub_query=st.question,
+                                extractor_model="extractor_v1",
+                                expected_claim_type=expected_claim_type,
+                            ),
+                            timeout=_SUB_TOPIC_TIMEOUT_S,
+                        )
+                    except _asyncio.TimeoutError:
+                        logger.warning(
+                            "[W3 R0 sub_topic TIMEOUT] st=%s ect=%s budget=%.0fs — "
+                            "keeping partial extract (may be empty)",
+                            st.id, expected_claim_type, _SUB_TOPIC_TIMEOUT_S,
+                        )
+                        eus_v2 = []
                     # R6 ★:EU.dimension_id → framework.sections[i].section_id(宽标签,
                     # 如 market_size__tam),与 W7 (plan_v2_pipeline:478) 配对规则一致。
                     # 之前用 st.id(如 market_size__market_size__tam__tam_total)不匹配,

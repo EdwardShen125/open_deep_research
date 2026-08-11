@@ -11,8 +11,11 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import random
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 from urllib.parse import urlsplit
@@ -23,6 +26,13 @@ from open_deep_research.llm import get_prompt
 from open_deep_research.prompts import EXTRACT_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+# W3 R0 diagnose: concurrency budget for LLM extraction. Default 4 — MiniMax
+# has tight RPM; 8 was observed to trigger 429 in earlier attempts. Override
+# via ODR_LLM_EXTRACT_CONCURRENCY env var. Per-call timeout stays 60s;
+# sub_topic budget is the caller's concern (plan_v2_pipeline.py).
+_LLM_EXTRACT_CONCURRENCY = int(os.environ.get("ODR_LLM_EXTRACT_CONCURRENCY", "4"))
 
 
 def _extract_json(text: str) -> Optional[str]:
@@ -295,23 +305,37 @@ async def extract_from_search_results_with_llm(
     out: list[EvidenceUnitV2] = []
     # W3 R0 diagnose: heartbeat so a stuck LLM call is visible mid-flight.
     # Without this, a 10-min hang is invisible until SIGTERM. With it,
-    # the log shows [W3 llm_extractor progress] 1/N url=... every page.
+    # the log shows [W3 llm_extractor progress] completed=N/total ...
     _results_list = list(results)
     _total = len(_results_list)
     logger.info(
-        "[W3 llm_extractor progress] starting: total_pages=%d run_id=%s",
-        _total, rid,
+        "[W3 llm_extractor progress] starting: total_pages=%d run_id=%s concurrency=%d",
+        _total, rid, _LLM_EXTRACT_CONCURRENCY,
     )
-    for _idx, r in enumerate(_results_list, start=1):
+    if _total == 0:
+        return out
+
+    # W3 R0 diagnose: concurrent extraction. Sequential was ~13-19s/page so
+    # 40 pages = 8-12 min — way over our 360s sub_topic budget. Semaphore
+    # 4 (configurable via ODR_LLM_EXTRACT_CONCURRENCY) drops wall time to
+    # ~2-3 min while staying under MiniMax RPM. Per-page failures (timeout,
+    # parse, exception) are isolated via return_exceptions and counted
+    # explicitly — no silent drops.
+    _sem = asyncio.Semaphore(_LLM_EXTRACT_CONCURRENCY)
+    _completed = 0
+    _failed = 0
+    _lock = asyncio.Lock()
+
+    async def _extract_one(idx: int, r: dict[str, Any]) -> list[EvidenceUnitV2]:
+        nonlocal _completed, _failed
         url = r.get("url") or ""
-        logger.info(
-            "[W3 llm_extractor progress] %d/%d starting url=%s",
-            _idx, _total, url,
-        )
-        if not url:
-            continue
         title = r.get("title")
         content = r.get(content_key) or ""
+        if not url:
+            async with _lock:
+                _completed += 1
+                _failed += 1
+            return []
         if not content:
             for k in fallback_content_keys:
                 v = r.get(k)
@@ -319,19 +343,60 @@ async def extract_from_search_results_with_llm(
                     content = str(v)
                     break
         if not content:
-            # 没正文:跳过(覆盖率为 0,但不强行"创造"EU)
+            # No content — skip without counting as failure (coverage = 0 is fine)
+            async with _lock:
+                _completed += 1
+            return []
+        async with _sem:
+            try:
+                eus = await extract_from_content_with_llm(
+                    content=content,
+                    source_url=url,
+                    source_title=title,
+                    run_id=rid,
+                    sub_query=sub_query,
+                    llm=llm,
+                    extractor_model=extractor_model,
+                    expected_claim_type=expected_claim_type,
+                )
+                async with _lock:
+                    _completed += 1
+                    # Counter-based heartbeat: avoid noisy per-page log lines
+                    # that interleave under concurrency.
+                    if _completed % 5 == 0 or _completed == _total:
+                        logger.info(
+                            "[W3 llm_extractor progress] completed=%d/%d failed=%d last_url=%s",
+                            _completed, _total, _failed, url,
+                        )
+                return eus
+            except Exception as _e:
+                async with _lock:
+                    _completed += 1
+                    _failed += 1
+                logger.warning(
+                    "[W3 llm_extractor] page failed idx=%d url=%s err=%s",
+                    idx, url, _e,
+                )
+                return []
+
+    _tasks = [
+        asyncio.create_task(_extract_one(idx, r))
+        for idx, r in enumerate(_results_list)
+    ]
+    _gathered = await asyncio.gather(*_tasks, return_exceptions=True)
+    for _g in _gathered:
+        if isinstance(_g, BaseException):
+            # Shouldn't happen because _extract_one catches its own exceptions,
+            # but guard against CancelledError / system-level faults.
+            _failed += 1
+            logger.warning("[W3 llm_extractor] gather-level exception: %s", _g)
             continue
-        eus = await extract_from_content_with_llm(
-            content=content,
-            source_url=url,
-            source_title=title,
-            run_id=rid,
-            sub_query=sub_query,
-            llm=llm,
-            extractor_model=extractor_model,
-            expected_claim_type=expected_claim_type,
-        )
-        out.extend(eus)
+        if _g:
+            out.extend(_g)
+    logger.info(
+        "[W3 llm_extractor progress] DONE: total=%d completed=%d failed=%d extracted=%d",
+        _total, _completed, _failed, len(out),
+    )
     return out
 
 
