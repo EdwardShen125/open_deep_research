@@ -440,15 +440,61 @@ class SearXNGProvider:
                 else:
                     extras = {**extras, "engines": filtered}
 
-        for q in query.queries:
+        # V3 · Engines rotation — defeat SearXNG per-engine dedup.
+        #
+        # v34-v40 baseline was hitting SearXNG dedup: every query in the
+        # intent was issued with the same engines list, so SearXNG applied
+        # per-engine dedup across queries and collapsed 3 queries of
+        # CN-vendor EDR research to 7 raw_results (17% cap utilization).
+        #
+        # V3 fixes the root cause at TWO layers:
+        #   1. Prompt: query_constructor prompt now asks LLM for 3-6
+        #      *semantically complementary* variants (scale / growth / share
+        #      / regulation / adoption) instead of 3 near-duplicates.
+        #   2. SearXNGProvider: each variant is issued with a *rotated*
+        #      engines subset, so consecutive variants hit different engines
+        #      and SearXNG can't dedup across them.
+        #
+        # Per-variant raw_results counts are logged so operators can see
+        # which variants / engine slices pay off.
+        #
+        # Disabled when len(query.queries)<3 or len(base_engines)<3 — we
+        # need both rotation to be meaningful AND each variant to keep
+        # enough engine breadth (≥3) to remain useful.
+        base_engines = list(extras.get("engines") or [])
+        rotate_engines = (
+            bool(base_engines)
+            and len(query.queries) >= 3
+            and len(base_engines) >= 3
+        )
+        n_q = len(query.queries)
+        n_e = len(base_engines)
+        # Track per-variant raw_results counts for observability. Even
+        # when DEBUG is off, log rotation effectiveness at INFO so
+        # operators can audit rotation in production without env tweaks.
+        per_variant_counts: list[tuple[int, int, list[str]]] = []  # (q_idx, count, engines_used)
+        for q_idx, q in enumerate(query.queries):
             params: dict[str, Any] = {
                 "q": q,
                 "format": "json",
                 "language": "auto",
                 "safesearch": 0,
             }
-            # Surface extras → URL params, only when non-empty.
-            engines = extras.get("engines")
+            # Per-variant engines slice.
+            engines: list[str] = []
+            if rotate_engines:
+                # Each variant gets a window of ceil(n_e/n_q) engines
+                # sliding by 1 — every engine reaches every variant over
+                # the intent (rotation covers the whole pool) but no two
+                # consecutive variants share the same primary engine.
+                # Fallback: when n_q >> n_e, variants repeat the engine
+                # pool (deterministic; SearXNG dedup still works against
+                # us but at least engines rotate).
+                k = max(3, (n_e + n_q - 1) // n_q)  # ceil division, min 3
+                start = (q_idx * max(1, n_e // n_q)) % n_e
+                engines = [base_engines[(start + j) % n_e] for j in range(min(k, n_e))]
+            else:
+                engines = base_engines
             if engines:
                 params["engines"] = ",".join(engines)
             categories = extras.get("categories")
@@ -468,10 +514,11 @@ class SearXNGProvider:
                     logger.warning("[SEARXNG] url=%s/search params=%s timeout=%s",
                                 self._base_url, params, self._timeout)
                 resp = await fetcher(self._base_url + "/search", params, self._timeout)
+                n_results = len((resp or {}).get("results", []) or [])
+                per_variant_counts.append((q_idx, n_results, list(engines)))
                 if _DEBUG_SEARXNG:
-                    n = len((resp or {}).get("results", []) or [])
                     logger.warning("[SEARXNG] returned %d results, keys=%s, sample[0]=%s",
-                                  n, list((resp or {}).keys())[:8],
+                                  n_results, list((resp or {}).keys())[:8],
                                   (resp.get('results') or [{}])[0].get('url') if (resp or {}).get('results') else 'NONE')
             except Exception as e:
                 if _DEBUG_SEARXNG:
@@ -479,6 +526,7 @@ class SearXNGProvider:
                 else:
                     logger.warning("SearXNGProvider fetcher failed (%s): %s", type(e).__name__, e)
                 errors.append(f"{type(e).__name__}: {e}")
+                per_variant_counts.append((q_idx, -1, list(engines)))
                 continue
             for raw in resp.get("results", []) or []:
                 results.append(SearchResult.from_searxng(raw, q))
@@ -494,6 +542,22 @@ class SearXNGProvider:
                 f"base_url={self._base_url} errors={errors}",
                 failed=[self.name],
             )
+        # V3 observability: per-variant result counts + rotation decision.
+        # Always logged at INFO so rotation effectiveness is auditable
+        # without needing DEBUG_SEARXNG=1.
+        if per_variant_counts:
+            counts_only = [c for _, c, _ in per_variant_counts if c >= 0]
+            if rotate_engines:
+                logger.info(
+                    "[V3 rotation] n_queries=%d n_engines=%d per_variant_results=%s engines_per_variant=%s",
+                    n_q, n_e, counts_only,
+                    [e[:2] for _, _, e in per_variant_counts],
+                )
+            else:
+                logger.info(
+                    "[SEARXNG] rotation skipped: n_queries=%d n_engines=%d (need ≥3 each)",
+                    n_q, n_e,
+                )
         return results
 
     async def _default_fetcher(self, url: str, params: dict, timeout: float) -> dict:

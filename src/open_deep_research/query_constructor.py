@@ -179,7 +179,7 @@ def _vendor_site_query(brief: str, sub_topic_question: str) -> str:
 class QueryIntent(BaseModel):
     """One SearXNG search profile = one SearchQuery to issue."""
 
-    queries: list[str] = Field(min_length=1, max_length=3)
+    queries: list[str] = Field(min_length=1, max_length=8)
     topic: str = "general"
     language: str = "auto"
     categories: list[str] = Field(default_factory=lambda: ["general"])
@@ -213,19 +213,43 @@ class QueryIntent(BaseModel):
     @classmethod
     def _queries_sane(cls, v):
         """Run BEFORE the schema-level min/max length check so we can drop
-        blank entries first. Returns a list of ≤3 non-blank strings."""
+        blank entries first. Returns a list of ≤8 non-blank strings.
+
+        V2: rotation needs ≥5 variants per slot to defeat SearXNG
+        per-engine dedup. We never raise on length — site-scoped queries
+        combining vendor list + indicator name + locale can easily run
+        200+ chars. Truncate with warning instead so the slot survives
+        (the alternative — raising and failing the whole intent —
+        loses all the other variants already paid for).
+        """
         if not isinstance(v, list):
             return v  # let Pydantic raise the type error
+        # Per-query ceiling. site: queries get a higher limit because
+        # combining 5-7 site: domains + indicator + locale routinely
+        # pushes 200-300 chars; SearXNG tolerates this fine.
+        QUERY_LEN_DEFAULT = 200
+        QUERY_LEN_SITE_SCOPED = 300
         cleaned = []
         for q in v:
             if not isinstance(q, str):
                 return v  # let Pydantic raise the type error
-            if len(q) > 200:
-                raise ValueError(f"query too long ({len(q)} chars): {q[:80]!r}...")
+            is_site_scoped = "site:" in q
+            cap = QUERY_LEN_SITE_SCOPED if is_site_scoped else QUERY_LEN_DEFAULT
+            if len(q) > cap:
+                # Warn + truncate rather than raise — losing the whole
+                # intent because one query is too long is worse than
+                # accepting a slightly trimmed query. Search engines
+                # tolerate truncation.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "V2 query_constructor truncate: %d→%d chars (site=%s): %s",
+                    len(q), cap, is_site_scoped, q[:80],
+                )
+                q = q[:cap].rstrip()
             s = q.strip()
             if s:
                 cleaned.append(s)
-        return cleaned[:3]  # hard cap at 3 after blanks dropped
+        return cleaned[:8]  # V2: 3→8 to support rotation
 
     @field_validator("categories")
     @classmethod
@@ -264,7 +288,7 @@ class ExecutionPlan(BaseModel):
 
     version: int = 1
     rationale: str = ""
-    intents: list[QueryIntent] = Field(min_length=1, max_length=4)
+    intents: list[QueryIntent] = Field(min_length=1, max_length=8)
     source: str = "deterministic"   # 'deterministic' | 'llm' | 'cache'
 
     def to_dict(self) -> dict[str, Any]:
@@ -319,8 +343,14 @@ def _sanitize_query_for_searxng(q: str) -> str:
     out = re.sub(r"[:\(\)\[\]\{\}\\/\u2014\u2013\u2018\u2019\u201C\u201D\u00B7\u2026\u00A0]",
                  " ", out)
     out = re.sub(r"\s+", " ", out).strip()
-    if len(out) > 120:
-        out = out[:120].rstrip()
+    if "site:" in out:
+        # site-scoped queries: 5-7 site: domains + indicator routinely
+        # need 200-300 chars after sanitization. Keep them whole.
+        cap = 300
+    else:
+        cap = 120
+    if len(out) > cap:
+        out = out[:cap].rstrip()
     return out or q
 
 
@@ -492,8 +522,15 @@ def _deterministic_fallback(brief: str, sub_topic: Any) -> ExecutionPlan:
         # parens are needed for OR-grouping, and the query is hand-crafted.
         # Truncate to 120 chars to stay within SearXNG's limit (we keep
         # only the most important site: clauses if it overflows).
-        if len(vendor_q) > 120:
-            vendor_q = vendor_q[:120].rstrip()
+        # V2: site-scoped vendor queries routinely combine 5-7 domains
+        # + indicator + locale. Keep up to 300 chars rather than
+        # truncating to 120 (which silently dropped most vendors).
+        if len(vendor_q) > 300:
+            import logging
+            logging.getLogger(__name__).warning(
+                "V2 vendor_q truncate: %d→300 chars: %s", len(vendor_q), vendor_q[:80],
+            )
+            vendor_q = vendor_q[:300].rstrip()
         intents.append(QueryIntent(
             queries=[vendor_q],
             topic="general",

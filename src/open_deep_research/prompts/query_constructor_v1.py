@@ -27,7 +27,10 @@ Output: a JSON object matching the `ExecutionPlan` schema:
 Critical contract: schema MUST be honored so blind JSON parse into
 Pydantic succeeds. If a value is unknown, omit it (don't fabricate).
 Per Intent rules:
- - `queries`: 1-3 entries, each ≤120 chars (SearXNG limit), no em-dash / colon / parens.
+ - `queries`: 1-8 entries (V2/V3 — rotation needs ≥3 to defeat SearXNG
+            per-engine dedup). Each ≤200 chars non-site-scoped, ≤300 chars
+            if it contains `site:`. The validator truncates instead of raising
+            so a long site-scoped query doesn't fail the whole intent.
  - `topic`:   SearXNG `topic` parameter (general/news/science/it/...).
  - `language`:"auto" | "en" | "zh-CN" | "all". Bias locale toward the brief.
  - `categories`: subset of SearXNG categories; pick those matching the dimension.
@@ -97,8 +100,48 @@ You MUST emit AT LEAST ONE intent. Emit two when:
 
 When the brief contains no vendor/entity AND the dimension is purely descriptive → emit ONE intent with broader engines (still include 360search for breadth).
 
+## V3 · Rotation spec — generate SEMANTICALLY COMPLEMENTARY variants
+
+SearXNG applies per-engine dedup. If you emit 3 queries that all ask
+the same vendor share question via the same engines, SearXNG collapses
+them to one vendor blog and you get 7/40 cap utilization (the v34-v40
+pain). To defeat this, emit multiple queries that hit the slot from
+*different angles* AND rotate engines across them.
+
+For each intent, generate 3-6 queries that cover distinct angles:
+  1. Scale / TAM / total revenue (engines: 360search + chinaso news)
+  2. Growth / YoY / CAGR / forecast (engines: bing + sogou)
+  3. Vendor share / ranking / competitive landscape (engines: 360search + wikipedia)
+  4. Regulation / compliance / 法规 (engines: chinaso news + brave)
+  5. Customer adoption / 客户案例 (engines: sogou + duckduckgo)
+
+Each variant should be a *complete, runnable query* — not a rephrasing.
+The system will distribute engines per variant so SearXNG sees different
+engine slices per call (rotation). Per-variant result counts are logged
+so you can tune which angles pay off.
+
+Example (good — 4 complementary variants):
+  queries=[
+    "中国 EDR 终端安全 市场 总规模 2026 IDC 报告",           # scale
+    "中国 EDR 厂商 年同比增长率 2024-2026 预测",              # growth
+    "中国 EDR 市场份额 奇安信 深信服 绿盟 启明星辰 排名",       # vendor share
+    "中国 终端安全 法规 等保2.0 EDR 合规要求"                 # regulation
+  ]
+
+Example (bad — 3 near-duplicates):
+  queries=[
+    "中国 EDR 市场 2026",
+    "中国 EDR 市场规模 2026 报告",
+    "中国 EDR 行业 2026 规模",
+  ]
+  → SearXNG dedup collapses to 1-2 vendor blogs. Don't do this.
+
 ## Hard rules
-- Each `queries[i]` MUST be ≤120 characters, ASCII-safe (no em-dash / colon / parentheses / brackets — replace with space or hyphen).
+- Each `queries[i]` MUST be ≤200 characters non-site-scoped, ≤300 if it
+  contains `site:`. ASCII-safe (no em-dash / colon / parentheses / brackets
+  — replace with space or hyphen) UNLESS the query is site-scoped (then
+  parens/colons are required for `site:` and `OR` grouping; those queries
+  are NOT sanitized).
 - Use the brief's main locale (heuristic: ≥30% Chinese characters → locale=zh-CN, else en).
 - For market_size / adoption: prefer engines=[bing, 360search, chinaso news, wikipedia, brave] + topic=general + time_range=null. **Do NOT default to arxiv/openalex** — those engines pollute results with EDR-disambiguation noise (Early Data Release astronomy, Energy Demand Reduction, Event Data Recorder). **ALSO do not set time_range=year** — SearXNG returns 0 results with time_range=year regardless of language/engines. **ALWAYS include 360search** for Chinese vendor site: recall.
 - For regulation: prefer topic=news, engines=[bing, 360search, chinaso news], time_range=month (regulatory news ages quickly).
