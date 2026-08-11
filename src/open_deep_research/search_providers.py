@@ -440,18 +440,7 @@ class SearXNGProvider:
                 else:
                     extras = {**extras, "engines": filtered}
 
-        # Engines-diversity rotation (v41): when caller supplied a single
-        # engines list for N queries, SearXNG applies the same engines to
-        # every query and dedupes by URL, which often collapses 3 queries
-        # of vendor / market briefs to the same handful of vendor blogs
-        # (raw_results <10 even when cap=40). Rotate engines per-query so
-        # each query surfaces a different slice of the engine pool.
-        # Disabled when query.queries is empty or engines<3 (we want at
-        # least 3 engines per query for breadth).
-        base_engines = list(extras.get("engines") or [])
-        rotate_engines = bool(base_engines) and len(query.queries) >= 2 and len(base_engines) >= 3
-        n_q = len(query.queries)
-        for q_idx, q in enumerate(query.queries):
+        for q in query.queries:
             params: dict[str, Any] = {
                 "q": q,
                 "format": "json",
@@ -459,20 +448,7 @@ class SearXNGProvider:
                 "safesearch": 0,
             }
             # Surface extras → URL params, only when non-empty.
-            engines: list[str] = []
-            if rotate_engines:
-                # Each query rotates 1 of its engines (primary) while
-                # keeping the others fixed — ensures 3 engines per query
-                # but each query gets a different primary, breaking
-                # SearXNG dedup while preserving breadth. Result: every
-                # engine still reaches every query over the sub_topic
-                # (rotation covers the whole pool), but consecutive
-                # queries don't share the same primary engine.
-                k = 3  # 3 engines per query — proven safe above
-                start = q_idx % len(base_engines)
-                engines = [base_engines[(start + j) % len(base_engines)] for j in range(min(k, len(base_engines)))]
-            else:
-                engines = base_engines
+            engines = extras.get("engines")
             if engines:
                 params["engines"] = ",".join(engines)
             categories = extras.get("categories")
@@ -517,15 +493,6 @@ class SearXNGProvider:
                 f"SearXNGProvider returned 0 results across {len(query.queries)} query(s); "
                 f"base_url={self._base_url} errors={errors}",
                 failed=[self.name],
-            )
-        # v41 observability: log engines-rotation effectiveness so future
-        # regressions surface in stderr, not silent in [SEARXNG] lines.
-        if _DEBUG_SEARXNG and rotate_engines:
-            logger.warning(
-                "[SEARXNG] rotation enabled n_queries=%d n_engines=%d total_results=%d "
-                "queries=%s engines=%s",
-                len(query.queries), len(base_engines), len(results),
-                [q[:30] for q in query.queries], base_engines,
             )
         return results
 
