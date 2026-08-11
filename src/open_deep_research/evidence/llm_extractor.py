@@ -219,7 +219,22 @@ async def extract_from_content_with_llm(
             {"role": "system", "content": "You are a strict evidence extractor."},
             {"role": "user", "content": prompt},
         ]
-        response = await llm.ainvoke(messages)
+        # W3 R0 diagnose: bound every LLM call so a stuck upstream can't
+        # hang the whole sub_topic. 60s is generous for MiniMax-m2 / Claude;
+        # raise LLMCallTimeout on overflow so the per-page loop can log it
+        # and continue with the next page instead of dying silently.
+        import asyncio as _asyncio
+        _LLM_CALL_TIMEOUT_S = 60.0
+        try:
+            response = await _asyncio.wait_for(
+                llm.ainvoke(messages), timeout=_LLM_CALL_TIMEOUT_S
+            )
+        except _asyncio.TimeoutError as _te:
+            logger.warning(
+                "llm_extractor: LLM TIMEOUT after %.0fs url=%s — skipping page",
+                _LLM_CALL_TIMEOUT_S, source_url,
+            )
+            return []
         raw = getattr(response, "content", str(response))
         if not isinstance(raw, str):
             raw = str(raw)
@@ -278,8 +293,21 @@ async def extract_from_search_results_with_llm(
     """
     rid = UUID(run_id) if isinstance(run_id, str) else run_id
     out: list[EvidenceUnitV2] = []
-    for r in results:
+    # W3 R0 diagnose: heartbeat so a stuck LLM call is visible mid-flight.
+    # Without this, a 10-min hang is invisible until SIGTERM. With it,
+    # the log shows [W3 llm_extractor progress] 1/N url=... every page.
+    _results_list = list(results)
+    _total = len(_results_list)
+    logger.info(
+        "[W3 llm_extractor progress] starting: total_pages=%d run_id=%s",
+        _total, rid,
+    )
+    for _idx, r in enumerate(_results_list, start=1):
         url = r.get("url") or ""
+        logger.info(
+            "[W3 llm_extractor progress] %d/%d starting url=%s",
+            _idx, _total, url,
+        )
         if not url:
             continue
         title = r.get("title")

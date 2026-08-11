@@ -104,7 +104,15 @@ class Crawl4AIProvider:
             return CrawlResponse(url=url, error="unparseable url")
         fetcher = self._fetcher or self._default_fetcher
         try:
-            blob = await fetcher(url, self._timeout)
+            # W3 R0 diagnose: outer wait_for so a runaway fetch can't hang
+            # the whole sub_topic. timeout is the configured per-call budget.
+            blob = await asyncio.wait_for(
+                fetcher(url, self._timeout), timeout=self._timeout * 2
+            )
+        except asyncio.TimeoutError as _te:
+            return CrawlResponse(
+                url=url, error=f"fetch timeout after {self._timeout * 2:.0f}s",
+            )
         except Exception as e:
             return CrawlResponse(url=url, error=f"fetch error: {type(e).__name__}: {e}")
 
@@ -130,7 +138,9 @@ class Crawl4AIProvider:
             )
         # Re-fetch the promoted page.
         try:
-            blob2 = await fetcher(promoted, self._timeout)
+            blob2 = await asyncio.wait_for(
+                fetcher(promoted, self._timeout), timeout=self._timeout * 2
+            )
             md2 = blob2.get("markdown") or blob2.get("raw_content")
         except Exception as e:
             return CrawlResponse(
