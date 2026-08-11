@@ -97,3 +97,46 @@ def test_run_odr_does_not_have_search_empty_fallback_branch():
     for pat in forbidden_patterns:
         m = pat.search(text)
         assert not m, f"run_odr.py has silent fallback pattern: {pat.pattern}"
+
+
+def test_run_odr_searxng_or_fixture_does_not_silently_fall_back():
+    """V1 fix: SearXNGOrFixtureProvider must raise on SearXNG failure
+    instead of silently returning fixture data.
+
+    Background: pre-V1, run_odr.py SearXNGOrFixtureProvider had
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        return await self._fixture.search(query)
+
+    This silently returned canned emarketer/mckinsey US live commerce
+    data when SearXNG failed, polluting CN EDR research with US
+    retail content. V1 fix: re-raise on SearXNG failure, refuse
+    fixture fallback when healthz ping fails.
+    """
+    runner = SRC / "run_odr.py"
+    if not runner.exists():
+        return
+    text = runner.read_text(encoding="utf-8")
+    # Locate the SearXNGOrFixtureProvider.search method body
+    assert "class SearXNGOrFixtureProvider" in text, "class not found"
+    # Must NOT have a bare `return await self._fixture.search(query)`
+    # reachable from the SearXNG failure path.
+    # We allow the attribute to exist (self._fixture = FixtureProvider()
+    # for backward-compat) but not use it in the search() method.
+    m = re.search(
+        r"async def search\(self.*?return await self\._fixture\.search",
+        text,
+        re.DOTALL,
+    )
+    assert not m, (
+        "run_odr.py SearXNGOrFixtureProvider.search still has "
+        "`return await self._fixture.search(query)` — silent fixture fallback!"
+    )
+    # Must have a re-raise in the SearXNG failure path
+    m2 = re.search(
+        r"async def search\(self.*?raise\b",
+        text,
+        re.DOTALL,
+    )
+    assert m2, "run_odr.py SearXNGOrFixtureProvider.search must re-raise on SearXNG failure"

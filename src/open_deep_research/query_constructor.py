@@ -564,8 +564,11 @@ class _PlanCacheEntry:
     plan: ExecutionPlan
     expires_at: float
 
-_CACHE: dict[tuple[str, str], _PlanCacheEntry] = {}
-_CACHE_TTL_SECONDS = 3600
+_CACHE: dict[tuple[str, str, str], _PlanCacheEntry] = {}
+_CACHE_TTL_SECONDS = 60  # V3: prompt just changed; cap TTL aggressively
+                          # so prompt-version bumps + prompt-rotated content
+                          # invalidate quickly. Bump back to 3600 once
+                          # prompt is stable.
 
 # Master switch — set `OPEN_DEEP_RESEARCH_NO_QC=1` to disable QueryConstructor
 # entirely (legacy `SearchQuery(queries=[st.question], topic="general", max_results=5)`
@@ -598,7 +601,7 @@ def _sub_topic_hash(sub_topic: Any) -> str:
     return "st-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
 
-def _cache_get(key: tuple[str, str]) -> Optional[ExecutionPlan]:
+def _cache_get(key: tuple[str, str, str]) -> Optional[ExecutionPlan]:
     import time
     e = _CACHE.get(key)
     if e is None:
@@ -611,7 +614,7 @@ def _cache_get(key: tuple[str, str]) -> Optional[ExecutionPlan]:
     return p
 
 
-def _cache_put(key: tuple[str, str], plan: ExecutionPlan) -> None:
+def _cache_put(key: tuple[str, str, str], plan: ExecutionPlan) -> None:
     import time
     _CACHE[key] = _PlanCacheEntry(
         plan=plan.model_copy(deep=True),
@@ -774,7 +777,12 @@ async def construct(
             source="deterministic",
         )
 
-    key = (_brief_hash(brief), _sub_topic_hash(sub_topic))
+    # V3: cache key includes the prompt version so prompt edits
+    # automatically invalidate stale plans. Without this, a brief's
+    # plan gets frozen for TTL_SECONDS after one LLM call, even if
+    # the prompt that produced it was edited mid-flight.
+    from open_deep_research.prompts.query_constructor_v1 import PROMPT_VERSION
+    key = (_brief_hash(brief), _sub_topic_hash(sub_topic), PROMPT_VERSION)
     cached = _cache_get(key)
     if cached is not None:
         return cached

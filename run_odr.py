@@ -118,25 +118,53 @@ class FixtureProvider(SearchProvider):
 # =============================================================================
 
 class SearXNGOrFixtureProvider(SearchProvider):
-    """Try SearXNG first; fall back to fixture if unreachable."""
+    """Try SearXNG first; raise on failure (V1 — no silent fixture fallback).
+
+    V1 fix: pre-fix this class silently returned canned US live commerce
+    fixture data when SearXNG failed, polluting CN EDR research with US
+    retail content. Post-fix: SearXNG failure raises — the pipeline
+    surfaces the real outage rather than fake data.
+    """
 
     name = "searxng-or-fixture"
 
-    def __init__(self, searxng_url: str = "http://172.18.0.2:8080"):
-        self._searxng_url = searxng_url
+    def __init__(self, searxng_url: str = "http://172.20.0.5:8080"):
+        # V3 ★: default URL now includes :8080 — pre-fix default
+        # "http://172.18.0.2:8080" was the legacy compose-bridge IP; even
+        # newer callers who passed a bare host without :8080 would silently
+        # hit port 80 and get "connect refused" rather than a useful error.
+        self._searxng_url = searxng_url.rstrip("/")
         self._fixture = FixtureProvider()
         self._searxng_reachable: bool | None = None
 
     async def _check_searxng(self) -> bool:
         if self._searxng_reachable is not None:
             return self._searxng_reachable
-        import urllib.request, urllib.error
+        # V3 diagnostic: log host that we're about to ping so we can tell
+        # whether the URL is misconfigured vs the server is truly down.
+        import logging as _lg
+        _lg.getLogger(__name__).info(
+            "[SearXNGOrFixture] healthz ping target=%s", self._searxng_url,
+        )
+        # Use httpx async client — the previous urllib+sync version blocked
+        # the asyncio event loop and looked like an OSError in some
+        # environments even when the server was reachable. async + httpx
+        # avoids that, and we get proper timeout/exception surfaces.
         try:
-            urllib.request.urlopen(
-                f"{self._searxng_url}/healthz", timeout=2
-            ).read()
-            self._searxng_reachable = True
-        except (urllib.error.URLError, OSError):
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(f"{self._searxng_url}/healthz")
+                self._searxng_reachable = (r.status_code == 200)
+                _lg.getLogger(__name__).info(
+                    "[SearXNGOrFixture] healthz ping result=%s reachable=%s",
+                    r.status_code, self._searxng_reachable,
+                )
+        except Exception as e:
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "[SearXNGOrFixture] healthz ping failed (%s): %s — target=%s",
+                type(e).__name__, e, self._searxng_url,
+            )
             self._searxng_reachable = False
         return self._searxng_reachable
 
@@ -151,12 +179,30 @@ class SearXNGOrFixtureProvider(SearchProvider):
             try:
                 from open_deep_research.search_providers import SearXNGProvider
                 p = SearXNGProvider(self._searxng_url, timeout=30.0)
-                return await p.search(query)
-            except Exception:
-                import traceback
-                traceback.print_exc()
-        # Fallback to fixture.
-        return await self._fixture.search(query)
+                rs = await p.search(query)
+                import logging as _lg
+                _lg.getLogger(__name__).info(
+                    "[SearXNGOrFixture] SearXNG returned %d results (real)",
+                    len(rs),
+                )
+                return rs
+            except Exception as _exc:
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    "[SearXNGOrFixture] SearXNG raised %s: %s — NOT falling back to fixture (would pollute). Re-raising.",
+                    type(_exc).__name__, _exc,
+                )
+                # V1 ★: silent fixture fallback was the dangerous failure mode.
+                # We re-raise so the pipeline sees the real failure rather than
+                # canned emarketer/mckinsey US live commerce data.
+                raise
+        # SearXNG not reachable at all (ping failed). Don't degrade silently
+        # to fixture — that's the same V1 hazard. Raise so the operator
+        # sees a real outage.
+        raise RuntimeError(
+            f"SearXNG unreachable at {self._searxng_url} "
+            f"(healthz ping failed). Refusing to fall back to canned fixture data."
+        )
 
 
 # =============================================================================
@@ -417,7 +463,7 @@ def main():
     )
     p.add_argument("--brief", required=True, help="Research brief / question")
     p.add_argument("--mode", choices=["fixture", "live"], default="fixture")
-    p.add_argument("--searxng-url", default="http://172.18.0.2:8080")
+    p.add_argument("--searxng-url", default="http://172.20.0.5:8080")
     # R16 ★:optional Crawl4AI sidecar (HTTP). When set, the pipeline fetches
     # full-text markdown for each search result before extraction — which is
     # the difference between 'extract from snippet' and 'extract from real

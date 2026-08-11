@@ -417,6 +417,12 @@ class SearXNGProvider:
         alive_engines: Optional[set[str]] = None
         requested_engines = extras.get("engines")
         _DEBUG_SEARXNG_EARLY = bool(int(os.environ.get("OPEN_DEEP_RESEARCH_DEBUG_SEARXNG", "0")))
+        # V3: always log entry (was DEBUG-only). Without this, an empty
+        # SearXNG path was indistinguishable from "not called" in the log.
+        logger.info(
+            "[SEARXNG] entering search q=%r engines=%r timeout=%s",
+            query.queries, requested_engines, self._timeout,
+        )
         if _DEBUG_SEARXNG_EARLY:
             logger.warning("[SEARXNG] entering search q=%r extras=%r timeout=%s",
                            query.queries, {k: v for k, v in (extras or {}).items() if k in ('engines','language','time_range')}, self._timeout)
@@ -640,6 +646,17 @@ class UnifiedSearch:
         started = self._clock()
         resp = SearchResponse(results=[], source="")
 
+        # V3: log every search call so we can see whether SearXNGProvider
+        # is actually being invoked or whether cache / fallback path is
+        # silently returning stale data.
+        logger.info(
+            "[US.search] queries=%d engines=%r language=%r cache=%s",
+            len(query.queries),
+            (query.extras or {}).get("engines"),
+            (query.extras or {}).get("language"),
+            self.cache is not None,
+        )
+
         # ---- 1. cache hit ----
         cached = self._read_cache(query) if self.cache else None
         if cached and cached.get("results"):
@@ -647,15 +664,24 @@ class UnifiedSearch:
             resp.source = "cache"
             resp.cache_hits += 1
             resp.latency_ms = int((self._clock() - started) * 1000)
+            logger.info("[US.search] cache HIT n_results=%d", len(resp.results))
             return resp
         if self.cache:
             resp.cache_misses += 1
+            logger.info("[US.search] cache MISS, falling through to providers")
 
         # ---- 2. primary ----
         primary_failed = False
+        logger.info(
+            "[US.search] primary=%s fallback=%s",
+            getattr(self.primary, "name", None),
+            getattr(self.fallback, "name", None),
+        )
         if self.primary is not None:
             try:
+                logger.info("[US.search] calling primary=%s", self.primary.name)
                 results = await self.primary.search(query)
+                logger.info("[US.search] primary=%s returned %d", self.primary.name, len(results))
             except Exception as e:
                 primary_failed = True
                 resp.failed_providers.append(self.primary.name)
@@ -670,7 +696,9 @@ class UnifiedSearch:
         # 当 primary 没给出结果 / 没 primary / primary 失败时,fallback 接管
         if not resp.results and self.fallback is not None:
             try:
+                logger.info("[US.search] calling fallback=%s", self.fallback.name)
                 results = await self.fallback.search(query)
+                logger.info("[US.search] fallback=%s returned %d", self.fallback.name, len(results))
             except Exception as e:
                 resp.failed_providers.append(self.fallback.name)
                 logger.warning("fallback=%s failed: %s", self.fallback.name, e)

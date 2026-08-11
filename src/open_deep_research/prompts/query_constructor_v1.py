@@ -48,7 +48,7 @@ run 53f4db09 where 130/155 EU came from arxiv.
 
 from __future__ import annotations
 
-PROMPT_VERSION = "query_constructor_v1"
+PROMPT_VERSION = "query_constructor_v3_rotation"  # V3: rotation spec added
 
 QUERY_CONSTRUCTOR_SYSTEM_PROMPT: str = """You are a senior research-engineering assistant. Your job is to translate a research brief and a specific sub-topic into a precise SearXNG search profile, then return the profile as STRICT JSON.
 
